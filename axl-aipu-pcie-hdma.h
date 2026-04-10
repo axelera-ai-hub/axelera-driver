@@ -1,14 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Copyright (c) 2025 Axelera AI. All rights reserved. */
 
-#ifndef TRITON_PCIE_HDMA_H
-#define TRITON_PCIE_HDMA_H
+#ifndef AXL_AIPU_PCIE_HDMA_H
+#define AXL_AIPU_PCIE_HDMA_H
 
 #define __packed __attribute__((__packed__))
 
 #ifndef BIT
 #define BIT(nr) (1 << (nr))
-#endif
+#endif // AXL_AIPU_PCIE_HDMA_H
 
 #define HDMA_V0_LOCAL_ABORT_INT_EN  BIT(6)
 #define HDMA_V0_REMOTE_ABORT_INT_EN BIT(5)
@@ -22,11 +22,8 @@
 #define HDMA_V0_DOORBELL_START	    BIT(0)
 #define HDMA_V0_CH_STATUS_MASK	    GENMASK(1, 0)
 
-#define HDMA_DESC_BASE 0x0000000008000000
-#define HDMA_DESC_SIZE 0x0000000002000000
-#define HDMA_LINKED_LIST_DESC_OFF \
-	(HDMA_DESC_SIZE - sizeof(struct dw_hdma_ll_buf))
-#define HDMA_LINKED_LIST_DESC_BASE (HDMA_DESC_BASE + HDMA_LINKED_LIST_DESC_OFF)
+#define HDMA_DESC_BASE 0x0000000007000000
+#define HDMA_DESC_SIZE 0x0000000000800000
 
 enum dw_hdma_dir { DW_HDMA_DIR_READ, DW_HDMA_DIR_WRITE };
 
@@ -72,6 +69,7 @@ enum {
 // In LL-mode: control d-word of data element
 enum {
 	DW_HDMA_V0_CB = BIT(0),
+	DW_HDMA_V0_TCB = BIT(1),
 	DW_HDMA_V0_LLP = BIT(2),
 	DW_HDMA_V0_LWIE = BIT(3),
 	DW_HDMA_V0_RIE = BIT(4)
@@ -444,6 +442,15 @@ __hdma_ch(volatile struct dw_hdma_v0_regs *hdma, enum dw_hdma_dir dir, int ch)
 
 	return &hdma->ch[ch].rd;
 }
+static inline volatile void *__get_llp(volatile struct dw_hdma_ll_buf *ll,
+				       enum dw_hdma_dir dir, int channel,
+				       int index)
+{
+	if (dir == DW_HDMA_DIR_WRITE)
+		return &ll->ch[channel].wr[index].control;
+	else
+		return &ll->ch[channel].rd[index].control;
+}
 
 #define SET_32(hdma, name, value) writel(value, &(hdma->name))
 #define SET_RW_32(hdma, dir, name, value)               \
@@ -523,4 +530,4 @@ __hdma_ch(volatile struct dw_hdma_v0_regs *hdma, enum dw_hdma_dir dir, int ch)
 #define LL_GET_64_RDCH(ll, channel, index, name) \
 	readq(&(ll->ch[channel].rd[index].name))
 
-#endif
+#endif // AXL_AIPU_PCIE_HDMA_H

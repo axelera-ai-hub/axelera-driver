@@ -33,16 +33,17 @@
 #include <linux/dma-buf.h>
 #include <linux/poll.h>
 
-#include "metis-dmabuf.h"
-#include "metis.h"
-#include "metis-pcie-hdma.h"
-#include "metis-hdma-core.h"
-#include "metis-version.h"
+#include "axl-aipu-dmabuf.h"
+#include "axl-aipu.h"
+#include "axl-aipu-pcie-hdma.h"
+#include "axl-aipu-hdma-core.h"
+#include "axl-aipu-version.h"
 
-extern struct dentry *axlaipu_debugfs_root;
+extern struct dentry *axl_aipu_debugfs_root;
 
-static ssize_t hdma_debugfs_info_read(struct file *file, char __user *user_buf,
-				      size_t count, loff_t *ppos)
+static ssize_t axl_aipu_hdma_debugfs_info_read(struct file *file,
+					       char __user *user_buf,
+					       size_t count, loff_t *ppos)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	struct pci_dev *pdev = axldev->pdev;
@@ -86,10 +87,10 @@ static ssize_t hdma_debugfs_info_read(struct file *file, char __user *user_buf,
 	return ret;
 }
 
-static const struct file_operations hdma_debugfs_info_fops = {
+static const struct file_operations axl_aipu_hdma_debugfs_info_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
-	.read = hdma_debugfs_info_read,
+	.read = axl_aipu_hdma_debugfs_info_read,
 };
 
 #define SHOW_HDMA_SW_REG32(offset, channel, reg)                     \
@@ -97,9 +98,9 @@ static const struct file_operations hdma_debugfs_info_fops = {
 		  __stringify(HDMA_##offset##_##channel),            \
 		  HDMA_##offset##_##channel, hdma->ch[channel].reg);
 
-static ssize_t hdma_debugfs_dbg_regs_read_0(struct file *file,
-					    char __user *user_buf, size_t count,
-					    loff_t *ppos)
+static ssize_t axl_aipu_hdma_debugfs_dbg_regs_read_0(struct file *file,
+						     char __user *user_buf,
+						     size_t count, loff_t *ppos)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	volatile struct dw_hdma_v0_regs *hdma = axldev->dma;
@@ -182,15 +183,15 @@ static ssize_t hdma_debugfs_dbg_regs_read_0(struct file *file,
 	return ret;
 }
 
-static const struct file_operations hdma_debugfs_dbg_regs0_fops = {
+static const struct file_operations axl_aipu_hdma_debugfs_dbg_regs0_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
-	.read = hdma_debugfs_dbg_regs_read_0,
+	.read = axl_aipu_hdma_debugfs_dbg_regs_read_0,
 };
 
-static ssize_t hdma_debugfs_dbg_regs_read_1(struct file *file,
-					    char __user *user_buf, size_t count,
-					    loff_t *ppos)
+static ssize_t axl_aipu_hdma_debugfs_dbg_regs_read_1(struct file *file,
+						     char __user *user_buf,
+						     size_t count, loff_t *ppos)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	volatile struct dw_hdma_v0_regs *hdma = axldev->dma;
@@ -273,15 +274,15 @@ static ssize_t hdma_debugfs_dbg_regs_read_1(struct file *file,
 	return ret;
 }
 
-static const struct file_operations hdma_debugfs_dbg_regs1_fops = {
+static const struct file_operations axl_aipu_hdma_debugfs_dbg_regs1_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
-	.read = hdma_debugfs_dbg_regs_read_1,
+	.read = axl_aipu_hdma_debugfs_dbg_regs_read_1,
 };
 
-static ssize_t hdma_debugfs_dbg_regs_read_2(struct file *file,
-					    char __user *user_buf, size_t count,
-					    loff_t *ppos)
+static ssize_t axl_aipu_hdma_debugfs_dbg_regs_read_2(struct file *file,
+						     char __user *user_buf,
+						     size_t count, loff_t *ppos)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	volatile struct dw_hdma_v0_regs *hdma = axldev->dma;
@@ -364,15 +365,15 @@ static ssize_t hdma_debugfs_dbg_regs_read_2(struct file *file,
 	return ret;
 }
 
-static const struct file_operations hdma_debugfs_dbg_regs2_fops = {
+static const struct file_operations axl_aipu_hdma_debugfs_dbg_regs2_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
-	.read = hdma_debugfs_dbg_regs_read_2,
+	.read = axl_aipu_hdma_debugfs_dbg_regs_read_2,
 };
 
-static ssize_t hdma_debugfs_dbg_regs_read_3(struct file *file,
-					    char __user *user_buf, size_t count,
-					    loff_t *ppos)
+static ssize_t axl_aipu_hdma_debugfs_dbg_regs_read_3(struct file *file,
+						     char __user *user_buf,
+						     size_t count, loff_t *ppos)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	volatile struct dw_hdma_v0_regs *hdma = axldev->dma;
@@ -455,44 +456,488 @@ static ssize_t hdma_debugfs_dbg_regs_read_3(struct file *file,
 	return ret;
 }
 
-static const struct file_operations hdma_debugfs_dbg_regs3_fops = {
+static const struct file_operations axl_aipu_hdma_debugfs_dbg_regs3_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
-	.read = hdma_debugfs_dbg_regs_read_3,
+	.read = axl_aipu_hdma_debugfs_dbg_regs_read_3,
 };
 
-void hdma_dev_debugfs_init(struct axl_pcie_aipu_dev *axldev)
+static ssize_t
+axl_aipu_hdma_debugfs_dbg_rd_chx_ll_write(struct file *file,
+					  const char __user *ubuf, size_t size,
+					  loff_t *offp, int channel)
 {
-	struct pci_dev *pdev = axldev->pdev;
-	struct dentry *dentry;
-	char name[NAME_SIZE];
+	struct axl_pcie_aipu_dev *axldev = file->private_data;
+	volatile struct dw_hdma_v0_lli *lli;
+	volatile struct dw_hdma_ll_buf *lldch;
 
-	if (!axlaipu_debugfs_root)
-		return;
-
-	snprintf(name, NAME_SIZE, "%s-%s", axldev->dev_info->devname,
-		 dev_name(&pdev->dev));
-	dentry = debugfs_create_dir(name, axlaipu_debugfs_root);
-	if (IS_ERR(dentry)) {
-		dev_err(&pdev->dev, "Failed to create debugfs directory %s\n",
-			name);
-		return;
-	}
-	axldev->dentry = dentry;
-	dev_info(&pdev->dev, "Register directory %s\n", name);
-	debugfs_create_file("info", 0444, dentry, axldev,
-			    &hdma_debugfs_info_fops);
-	debugfs_create_file("dma-regs-ch0", 0444, dentry, axldev,
-			    &hdma_debugfs_dbg_regs0_fops);
-	debugfs_create_file("dma-regs-ch1", 0444, dentry, axldev,
-			    &hdma_debugfs_dbg_regs1_fops);
-	debugfs_create_file("dma-regs-ch2", 0444, dentry, axldev,
-			    &hdma_debugfs_dbg_regs2_fops);
-	debugfs_create_file("dma-regs-ch3", 0444, dentry, axldev,
-			    &hdma_debugfs_dbg_regs3_fops);
+	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vl2base +
+						   axldev->desc_offset);
+	lli = (volatile struct dw_hdma_v0_lli *)__get_ll_base(
+		lldch, DW_HDMA_DIR_WRITE, channel);
+	lli->control = 0;
+	dev_dbg(&axldev->pdev->dev, "Linked List Pointer reset\n");
+	return size;
 }
 
-void hdma_dev_debugfs_exit(struct axl_pcie_aipu_dev *axldev)
+static ssize_t axl_aipu_hdma_debugfs_dbg_rd_chx_ll_read(struct file *file,
+							char __user *user_buf,
+							size_t count,
+							loff_t *ppos,
+							int channel)
+{
+	struct axl_pcie_aipu_dev *axldev = file->private_data;
+	volatile struct dw_hdma_v0_regs *hdma = axldev->dma;
+	volatile struct dw_hdma_ll_buf *hwlldch;
+	volatile struct dw_hdma_ll_buf *lldch;
+	volatile struct dw_hdma_v0_lli *lli;
+	char *strbuf;
+	size_t size, ret, off = 0;
+	int i = 0;
+
+	size = max_t(size_t, count, 0x2000U);
+
+	strbuf = kmalloc(size, GFP_KERNEL);
+	if (strbuf == NULL)
+		return -ENOMEM;
+
+	if (channel >= HDMA_V0_MAX_NR_CH) {
+		off = scnprintf(strbuf + off, size - off,
+				"Wrong channel %d [ 0- 3 ]\n", channel);
+		goto out_rd_chx_ll;
+	}
+	off = scnprintf(strbuf + off, size - off,
+			"\n\n========= RD Channel %d ================\n",
+			channel);
+	off += scnprintf(strbuf + off, size - off, "llp         : 0x%08x%08x\n",
+			 hdma->ch[channel].rd.llp.msb,
+			 hdma->ch[channel].rd.llp.lsb);
+	if (hdma->ch[channel].rd.llp.msb == 0 &&
+	    hdma->ch[channel].rd.llp.lsb == 0) {
+		off = scnprintf(strbuf + off, size - off,
+				"Linked List Pointer not configured\n");
+		goto out_rd_chx_ll;
+	}
+
+	hwlldch =
+		(struct dw_hdma_ll_buf *)((uint64_t)hdma->ch[channel].rd.llp.msb
+						  << 32 |
+					  hdma->ch[channel].rd.llp.lsb);
+	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vl2base +
+						   axldev->desc_offset);
+	lli = (volatile struct dw_hdma_v0_lli *)__get_ll_base(
+		lldch, DW_HDMA_DIR_READ, channel);
+
+	for (i = 0; (lli->control & (DW_HDMA_V0_CB)) && i < DW_HDMA_LL_MAX_NUM;
+	     i++, lli++) {
+		off += scnprintf(strbuf + off, size - off,
+				 "Linked-list index %d\n", i);
+		off += scnprintf(
+			strbuf + off, size - off,
+			"control       : 0x%016llx 0x%08x\n",
+			(uint64_t)(&hwlldch->ch[channel].rd[i].control),
+			lli->control);
+		if (lli->control & DW_HDMA_V0_LLP) {
+			off += scnprintf(
+				strbuf + off, size - off,
+				"llp           : 0x%016llx 0x%016llx\n",
+				(uint64_t)&hwlldch->ch[channel].rd[i].sar.reg,
+				lli->sar.reg);
+		} else {
+			off += scnprintf(strbuf + off, size - off,
+					 "transfer_size : 0x%016llx 0x%08x\n",
+					 (uint64_t)&hwlldch->ch[channel]
+						 .rd[i]
+						 .transfer_size,
+					 lli->transfer_size);
+			off += scnprintf(
+				strbuf + off, size - off,
+				"sar           : 0x%016llx 0x%016llx\n",
+				(uint64_t)&hwlldch->ch[channel].rd[i].sar.reg,
+				lli->sar.reg);
+			off += scnprintf(
+				strbuf + off, size - off,
+				"dar           : 0x%016llx 0x%016llx\n",
+				(uint64_t)&hwlldch->ch[channel].rd[i].dar.reg,
+				lli->dar.reg);
+		}
+	}
+
+out_rd_chx_ll:
+	ret = simple_read_from_buffer(user_buf, count, ppos, strbuf, off);
+	kfree(strbuf);
+
+	return ret;
+}
+
+#define TR_DBFS_RD_CHX_LL(_channel)                                                   \
+	static ssize_t axl_aipu_hdma_debugfs_dbg_rd_ch##_channel##_ll_write(          \
+		struct file *file, const char __user *user_buf, size_t count,         \
+		loff_t *ppos)                                                         \
+	{                                                                             \
+		return axl_aipu_hdma_debugfs_dbg_rd_chx_ll_write(                     \
+			file, user_buf, count, ppos, _channel);                       \
+	}                                                                             \
+	static ssize_t axl_aipu_hdma_debugfs_dbg_rd_ch##_channel##_ll_read(           \
+		struct file *file, char __user *user_buf, size_t count,               \
+		loff_t *ppos)                                                         \
+	{                                                                             \
+		return axl_aipu_hdma_debugfs_dbg_rd_chx_ll_read(                      \
+			file, user_buf, count, ppos, _channel);                       \
+	}                                                                             \
+	static const struct file_operations                                           \
+		axl_aipu_hdma_debugfs_dbg_rd_ch##_channel##_ll_fops = {               \
+			.owner = THIS_MODULE,                                         \
+			.open = simple_open,                                          \
+			.read = axl_aipu_hdma_debugfs_dbg_rd_ch##_channel##_ll_read,  \
+			.write =                                                      \
+				axl_aipu_hdma_debugfs_dbg_rd_ch##_channel##_ll_write, \
+		}
+TR_DBFS_RD_CHX_LL(0);
+TR_DBFS_RD_CHX_LL(1);
+TR_DBFS_RD_CHX_LL(2);
+TR_DBFS_RD_CHX_LL(3);
+
+static ssize_t
+axl_aipu_hdma_debugfs_dbg_wr_chx_ll_write(struct file *file,
+					  const char __user *ubuf, size_t size,
+					  loff_t *offp, int channel)
+{
+	struct axl_pcie_aipu_dev *axldev = file->private_data;
+	volatile struct dw_hdma_v0_regs *hdma = axldev->dma;
+	volatile struct dw_hdma_v0_lli *lli;
+	volatile struct dw_hdma_ll_buf *lldch;
+
+	if (hdma->ch[channel].wr.llp.msb == 0 &&
+	    hdma->ch[channel].wr.llp.lsb == 0) {
+		dev_err(&axldev->pdev->dev,
+			"Linked List Pointer not configured\n");
+		return size;
+	}
+	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vl2base +
+						   axldev->desc_offset);
+	lli = (volatile struct dw_hdma_v0_lli *)__get_ll_base(
+		lldch, DW_HDMA_DIR_WRITE, channel);
+	lli->control = 0;
+	dev_dbg(&axldev->pdev->dev, "Linked List Pointer reset\n");
+	return size;
+}
+
+static ssize_t axl_aipu_hdma_debugfs_dbg_wr_chx_ll_read(struct file *file,
+							char __user *user_buf,
+							size_t count,
+							loff_t *ppos,
+							int channel)
+{
+	struct axl_pcie_aipu_dev *axldev = file->private_data;
+	volatile struct dw_hdma_v0_regs *hdma = axldev->dma;
+	volatile struct dw_hdma_ll_buf *hwlldch;
+	volatile struct dw_hdma_ll_buf *lldch;
+	volatile struct dw_hdma_v0_lli *lli;
+	char *strbuf;
+	size_t size, ret, off = 0;
+	int i = 0;
+
+	size = max_t(size_t, count, 0x2000U);
+	dev_dbg(&axldev->pdev->dev, "WR:channel %d count %ld size %ld\n",
+		channel, count, size);
+
+	strbuf = kmalloc(size, GFP_KERNEL);
+	if (strbuf == NULL)
+		return -ENOMEM;
+
+	if (channel >= EDMA_V0_MAX_NR_CH) {
+		off = scnprintf(strbuf + off, size - off,
+				"Wrong channel %d [ 0- 3 ]\n", channel);
+		goto out_wr_chx_ll;
+	}
+	off = scnprintf(strbuf + off, size - off,
+			"\n\n========= WR Channel %d ================\n",
+			channel);
+	off += scnprintf(strbuf + off, size - off, "llp         : 0x%08x%08x\n",
+			 hdma->ch[channel].wr.llp.msb,
+			 hdma->ch[channel].wr.llp.lsb);
+	if (hdma->ch[channel].wr.llp.msb == 0 &&
+	    hdma->ch[channel].wr.llp.lsb == 0) {
+		off = scnprintf(strbuf + off, size - off,
+				"Linked List Pointer not configured\n");
+		goto out_wr_chx_ll;
+	}
+
+	hwlldch =
+		(struct dw_hdma_ll_buf *)((uint64_t)hdma->ch[channel].wr.llp.msb
+						  << 32 |
+					  hdma->ch[channel].wr.llp.lsb);
+	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vl2base +
+						   axldev->desc_offset);
+	lli = (volatile struct dw_hdma_v0_lli *)__get_ll_base(
+		lldch, DW_HDMA_DIR_WRITE, channel);
+
+	for (i = 0; (lli->control & (DW_HDMA_V0_CB)) && i < DW_HDMA_LL_MAX_NUM;
+	     i++, lli++) {
+		off += scnprintf(strbuf + off, size - off,
+				 "Linked-list index %d\n", i);
+		off += scnprintf(
+			strbuf + off, size - off,
+			"control       : 0x%016llx 0x%08x\n",
+			(uint64_t)(&hwlldch->ch[channel].wr[i].control),
+			lli->control);
+		if (lli->control & DW_HDMA_V0_LLP) {
+			off += scnprintf(
+				strbuf + off, size - off,
+				"llp           : 0x%016llx 0x%016llx\n",
+				(uint64_t)&hwlldch->ch[channel].wr[i].sar.reg,
+				lli->sar.reg);
+		} else {
+			off += scnprintf(strbuf + off, size - off,
+					 "transfer_size : 0x%016llx 0x%08x\n",
+					 (uint64_t)&hwlldch->ch[channel]
+						 .wr[i]
+						 .transfer_size,
+					 lli->transfer_size);
+			off += scnprintf(
+				strbuf + off, size - off,
+				"sar           : 0x%016llx 0x%016llx\n",
+				(uint64_t)&hwlldch->ch[channel].wr[i].sar.reg,
+				lli->sar.reg);
+			off += scnprintf(
+				strbuf + off, size - off,
+				"dar           : 0x%016llx 0x%016llx\n",
+				(uint64_t)&hwlldch->ch[channel].wr[i].dar.reg,
+				lli->dar.reg);
+		}
+	}
+
+out_wr_chx_ll:
+	ret = simple_read_from_buffer(user_buf, count, ppos, strbuf, off);
+	kfree(strbuf);
+
+	return ret;
+}
+
+#define TR_DBFS_WR_CHX_LL(_channel)                                                   \
+	static ssize_t axl_aipu_hdma_debugfs_dbg_wr_ch##_channel##_ll_write(          \
+		struct file *file, const char __user *user_buf, size_t count,         \
+		loff_t *ppos)                                                         \
+	{                                                                             \
+		return axl_aipu_hdma_debugfs_dbg_wr_chx_ll_write(                     \
+			file, user_buf, count, ppos, _channel);                       \
+	}                                                                             \
+	static ssize_t axl_aipu_hdma_debugfs_dbg_wr_ch##_channel##_ll_read(           \
+		struct file *file, char __user *user_buf, size_t count,               \
+		loff_t *ppos)                                                         \
+	{                                                                             \
+		return axl_aipu_hdma_debugfs_dbg_wr_chx_ll_read(                      \
+			file, user_buf, count, ppos, _channel);                       \
+	}                                                                             \
+	static const struct file_operations                                           \
+		axl_aipu_hdma_debugfs_dbg_wr_ch##_channel##_ll_fops = {               \
+			.owner = THIS_MODULE,                                         \
+			.open = simple_open,                                          \
+			.read = axl_aipu_hdma_debugfs_dbg_wr_ch##_channel##_ll_read,  \
+			.write =                                                      \
+				axl_aipu_hdma_debugfs_dbg_wr_ch##_channel##_ll_write, \
+		}
+TR_DBFS_WR_CHX_LL(0);
+TR_DBFS_WR_CHX_LL(1);
+TR_DBFS_WR_CHX_LL(2);
+TR_DBFS_WR_CHX_LL(3);
+
+static ssize_t axl_aipu_hdma_debugfs_dma_stat_read(struct file *file,
+						   char __user *user_buf,
+						   size_t count, loff_t *ppos)
+{
+	struct axl_pcie_aipu_dev *axldev = file->private_data;
+	struct dma_queue_ctrl *dma_ctrl;
+	int i, dcount, num_xfer, num_err, max_sgt;
+	u32 speed;
+	__u64 bytes_xfer;
+	char *strbuf;
+	size_t size, ret, off = 0, trsize;
+	ktime_t max_duration, duration;
+
+	size = max_t(size_t, count, 0x2000U);
+	strbuf = kmalloc(size, GFP_KERNEL);
+	if (strbuf == NULL)
+		return -ENOMEM;
+
+	off = scnprintf(strbuf + off, size - off, "\nDMA Statistics\n");
+	for (i = 0; i < EDMA_V0_MAX_NR_CH; i++) {
+		dma_ctrl = &axldev->dma_wrqc[i];
+		dcount = atomic_read(&dma_ctrl->count);
+		num_xfer = dma_ctrl->num_xfer;
+		num_err = dma_ctrl->num_err;
+		bytes_xfer = dma_ctrl->bytes_xfer;
+		max_sgt = dma_ctrl->max_sgt;
+		max_duration = dma_ctrl->max_duration;
+		duration = dma_ctrl->duration;
+		trsize = dma_ctrl->size;
+		speed = trsize / (ktime_to_us(duration) == 0 ?
+					  1 :
+					  ktime_to_us(duration));
+		off += scnprintf(strbuf + off, size - off,
+				 "\n========= RD Channel %d ================\n",
+				 i);
+		off += scnprintf(strbuf + off, size - off, "count : %d\n",
+				 dcount);
+		off += scnprintf(strbuf + off, size - off, "request : %d\n",
+				 num_xfer);
+		off += scnprintf(strbuf + off, size - off, "errors : %d\n",
+				 num_err);
+		off += scnprintf(strbuf + off, size - off, "bytes : %llu\n",
+				 bytes_xfer);
+		off += scnprintf(strbuf + off, size - off, "max sgt : %d\n",
+				 max_sgt);
+		off += scnprintf(strbuf + off, size - off,
+				 "max max_duration : %lldus\n",
+				 ktime_to_us(max_duration));
+		off += scnprintf(strbuf + off, size - off,
+				 "duration : %lld us\n", ktime_to_us(duration));
+		off += scnprintf(strbuf + off, size - off, "size : %lu Bytes\n",
+				 trsize);
+		off += scnprintf(strbuf + off, size - off, "speed : %u MB/s\n",
+				 speed);
+
+		dma_ctrl = &axldev->dma_rdqc[i];
+		dcount = atomic_read(&dma_ctrl->count);
+		num_xfer = dma_ctrl->num_xfer;
+		num_err = dma_ctrl->num_err;
+		bytes_xfer = dma_ctrl->bytes_xfer;
+		max_sgt = dma_ctrl->max_sgt;
+		max_duration = dma_ctrl->max_duration;
+		duration = dma_ctrl->duration;
+		trsize = dma_ctrl->size;
+		speed = trsize / (ktime_to_us(duration) == 0 ?
+					  1 :
+					  ktime_to_us(duration));
+		off += scnprintf(strbuf + off, size - off,
+				 "\n========= WR Channel %d ================\n",
+				 i);
+		off += scnprintf(strbuf + off, size - off, "count : %d\n",
+				 dcount);
+		off += scnprintf(strbuf + off, size - off, "request : %d\n",
+				 num_xfer);
+		off += scnprintf(strbuf + off, size - off, "errors : %d\n",
+				 num_err);
+		off += scnprintf(strbuf + off, size - off, "bytes : %llu\n",
+				 bytes_xfer);
+		off += scnprintf(strbuf + off, size - off, "max sgt : %d\n",
+				 max_sgt);
+		off += scnprintf(strbuf + off, size - off,
+				 "max duration : %lldus\n",
+				 ktime_to_us(max_duration));
+		off += scnprintf(strbuf + off, size - off,
+				 "duration : %lld us\n", ktime_to_us(duration));
+		off += scnprintf(strbuf + off, size - off, "size : %lu Bytes\n",
+				 trsize);
+		off += scnprintf(strbuf + off, size - off, "speed : %u MB/s\n",
+				 speed);
+	}
+	ret = simple_read_from_buffer(user_buf, count, ppos, strbuf, off);
+	kfree(strbuf);
+
+	return ret;
+}
+static ssize_t axl_aipu_hdma_debugfs_dma_stat_write(struct file *file,
+						    const char __user *user_buf,
+						    size_t size, loff_t *ppos)
+{
+	struct axl_pcie_aipu_dev *axldev = file->private_data;
+	int ret, i, val;
+
+	ret = kstrtoint_from_user(user_buf, size, 0, &val);
+	if (ret)
+		return ret;
+
+	switch (val) {
+	case 1:
+		for (i = 0; i < EDMA_V0_MAX_NR_CH; i++) {
+			axldev->dma_wrqc[i].num_xfer = 0;
+			axldev->dma_wrqc[i].num_err = 0;
+			axldev->dma_wrqc[i].bytes_xfer = 0;
+			axldev->dma_wrqc[i].max_sgt = 0;
+			axldev->dma_wrqc[i].max_duration = 0;
+			axldev->dma_wrqc[i].duration = 0;
+			axldev->dma_wrqc[i].size = 0;
+
+			axldev->dma_rdqc[i].num_xfer = 0;
+			axldev->dma_rdqc[i].num_err = 0;
+			axldev->dma_rdqc[i].bytes_xfer = 0;
+			axldev->dma_rdqc[i].max_sgt = 0;
+			axldev->dma_rdqc[i].max_duration = 0;
+			axldev->dma_rdqc[i].duration = 0;
+			axldev->dma_rdqc[i].size = 0;
+		}
+		dev_dbg(&axldev->pdev->dev, "DMA Statistics reset\n");
+		break;
+	case 2:
+		for (i = 0; i < EDMA_V0_MAX_NR_CH; i++) {
+			axldev->dma_wrqc[i].max_duration = 0;
+			axldev->dma_wrqc[i].duration = 0;
+			axldev->dma_wrqc[i].size = 0;
+
+			axldev->dma_rdqc[i].max_duration = 0;
+			axldev->dma_rdqc[i].duration = 0;
+			axldev->dma_rdqc[i].size = 0;
+		}
+		break;
+	default:
+		dev_info(
+			&axldev->pdev->dev,
+			"Supported options: 1 reset all, 2 reset max duration\n");
+	}
+
+	return size;
+}
+
+static const struct file_operations axl_aipu_hdma_debugfs_dma_stat_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.read = axl_aipu_hdma_debugfs_dma_stat_read,
+	.write = axl_aipu_hdma_debugfs_dma_stat_write,
+};
+
+void axl_aipu_hdma_dev_debugfs_init(struct axl_pcie_aipu_dev *axldev)
+{
+	struct dentry *dentry;
+
+	if (!axldev->dentry)
+		return;
+	dentry = axldev->dentry;
+
+	dev_info(&axldev->pdev->dev, "Register directory %s-%s\n",
+		 axldev->dev_info->devname, dev_name(&axldev->pdev->dev));
+	debugfs_create_file("info", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_info_fops);
+	debugfs_create_file("dma-regs-ch0", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_regs0_fops);
+	debugfs_create_file("dma-regs-ch1", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_regs1_fops);
+	debugfs_create_file("dma-regs-ch2", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_regs2_fops);
+	debugfs_create_file("dma-regs-ch3", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_regs3_fops);
+	debugfs_create_file("dma-rd-ch0-ll", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_rd_ch0_ll_fops);
+	debugfs_create_file("dma-rd-ch1-ll", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_rd_ch1_ll_fops);
+	debugfs_create_file("dma-rd-ch2-ll", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_rd_ch2_ll_fops);
+	debugfs_create_file("dma-rd-ch3-ll", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_rd_ch3_ll_fops);
+	debugfs_create_file("dma-wr-ch0-ll", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_wr_ch0_ll_fops);
+	debugfs_create_file("dma-wr-ch1-ll", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_wr_ch1_ll_fops);
+	debugfs_create_file("dma-wr-ch2-ll", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_wr_ch2_ll_fops);
+	debugfs_create_file("dma-wr-ch3-ll", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dbg_wr_ch3_ll_fops);
+	debugfs_create_file("dma-statistics", 0444, dentry, axldev,
+			    &axl_aipu_hdma_debugfs_dma_stat_fops);
+}
+
+void axl_aipu_hdma_dev_debugfs_exit(struct axl_pcie_aipu_dev *axldev)
 {
 	if (axldev->dentry) {
 		debugfs_remove_recursive(axldev->dentry);

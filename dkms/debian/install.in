@@ -1,0 +1,3 @@
+driver/ /usr/src/@DRIVER_NAME@-@DRIVER_VERSION@/
+extra/* /
+scripts/ /usr/share/@DRIVER_NAME@-dkms/

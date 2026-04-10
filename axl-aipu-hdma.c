@@ -33,22 +33,51 @@
 #include <linux/dma-buf.h>
 #include <linux/poll.h>
 
-#include "metis-dmabuf.h"
-#include "metis.h"
-#include "metis-pcie-hdma.h"
-#include "metis-hdma-core.h"
+#include "axl-aipu-dmabuf.h"
+#include "axl-aipu.h"
+#include "axl-aipu-pcie-hdma.h"
+#include "axl-aipu-hdma-core.h"
 
 /* Module params */
 extern unsigned int dma_poll;
 extern unsigned int enable_dmabuf_sync;
 
-static int hdma_dma_irq_ck(struct axl_pcie_aipu_dev *axldev, int id)
+static inline struct dw_hdma_ll_buf *
+axl_aipu_hdma_get_ll_desc_base(struct axl_pcie_aipu_dev *axldev)
+{
+	return (struct dw_hdma_ll_buf *)axldev->desc_base;
+}
+
+static void axl_aipu_hdma_dev_dynmem_init(struct axl_pcie_aipu_dev *axldev)
+{
+	struct device_dma_sg_desc_t *dma_sg_desc;
+	struct device_sys_ctl_t *dsctl;
+
+	dma_sg_desc = axl_aipu_get_dma_sg_desc_area(axldev);
+	if (dma_sg_desc) {
+		dsctl = axldev->vl2base;
+		axldev->desc_base = dma_sg_desc->dma_sg_desc_buf_ref.addr;
+		axldev->desc_offset =
+			axldev->desc_base - dsctl->memory_map[MEMORY_AREA_0];
+		pr_debug(
+			"HDMA DMA SG descriptor area found at 0x%llx (offset 0x%llx)\n",
+			axldev->desc_base, axldev->desc_offset);
+	} else {
+		pr_debug(
+			"HDMA SG descriptor area not found, falling back to fixed area\n");
+		axldev->desc_base = HDMA_DESC_BASE;
+		axldev->desc_offset =
+			HDMA_DESC_SIZE - sizeof(struct dw_hdma_ll_buf);
+	}
+}
+
+static int axl_aipu_hdma_dma_irq_ck(struct axl_pcie_aipu_dev *axldev, int id)
 {
 	pr_warn("not implemented\n");
 	return -1;
 }
 
-static void hdma_enable_ctrl(struct axl_pcie_aipu_dev *axldev)
+static void axl_aipu_hdma_enable_ctrl(struct axl_pcie_aipu_dev *axldev)
 {
 	struct dw_hdma_v0_regs *hdma = axldev->dma;
 	int i;
@@ -58,7 +87,32 @@ static void hdma_enable_ctrl(struct axl_pcie_aipu_dev *axldev)
 		writel(BIT(0), &hdma->ch[i].wr.ch_en);
 	}
 }
-static void hdma_init_imwr(struct axl_pcie_aipu_dev *axldev)
+static void axl_aipu_hdma_int_setup(struct dma_wrk *dma_wrk)
+{
+	u32 setup;
+	u64 tmp;
+	struct axl_pcie_aipu_dev *axldev = dma_wrk->axldev;
+	volatile struct dw_hdma_v0_regs *hdma = axldev->dma;
+	enum dw_hdma_dir dir = dma_wrk->flags & DMABUF_XFER_FLAG_READ ?
+				       DW_HDMA_DIR_WRITE :
+				       DW_HDMA_DIR_READ;
+	volatile struct dw_hdma_ll_buf *hwlldch =
+		(struct dw_hdma_ll_buf *)axl_aipu_hdma_get_ll_desc_base(axldev);
+
+	setup = GET_RW_32_CH(hdma, dir, int_setup, dma_wrk->channel);
+	setup &= ~(HDMA_V0_STOP_INT_MASK | HDMA_V0_ABORT_INT_MASK);
+	if (!dma_poll) {
+		setup |= HDMA_V0_REMOTE_STOP_INT_EN |
+			 HDMA_V0_REMOTE_ABORT_INT_EN;
+	}
+	SET_RW_32_CH(hdma, dir, int_setup, dma_wrk->channel, setup);
+	SET_RW_32_CH(hdma, dir, control1, dma_wrk->channel,
+		     HDMA_V0_LINKLIST_EN);
+	tmp = __get_ll_base(hwlldch, dir, dma_wrk->channel);
+	SET_RW_32_CH(hdma, dir, llp.lsb, dma_wrk->channel, lower_32_bits(tmp));
+	SET_RW_32_CH(hdma, dir, llp.msb, dma_wrk->channel, upper_32_bits(tmp));
+}
+static void axl_aipu_hdma_init_imwr(struct axl_pcie_aipu_dev *axldev)
 {
 	volatile struct dw_hdma_v0_regs *hdma = axldev->dma;
 	int i;
@@ -66,7 +120,7 @@ static void hdma_init_imwr(struct axl_pcie_aipu_dev *axldev)
 	u32 setup;
 	u64 tmp;
 	volatile struct dw_hdma_ll_buf *hwlldch =
-		(struct dw_hdma_ll_buf *)(HDMA_LINKED_LIST_DESC_BASE);
+		(struct dw_hdma_ll_buf *)axl_aipu_hdma_get_ll_desc_base(axldev);
 
 	for (i = 0; i < HDMA_V0_MAX_NR_CH; i++) {
 		dir = DW_HDMA_DIR_READ;
@@ -87,7 +141,8 @@ static void hdma_init_imwr(struct axl_pcie_aipu_dev *axldev)
 			SET_RW_32_CH(hdma, dir, msi_msgdata, i,
 				     axldev->irq_msi.data);
 		} else {
-			SET_RW_32_CH(hdma, dir, msi_msgdata, i, MSI_RD_CH0 + i);
+			SET_RW_32_CH(hdma, dir, msi_msgdata, i,
+				     PMSI_DMA_RD_CH0 + i);
 		}
 		setup = GET_RW_32_CH(hdma, dir, int_setup, i);
 		setup &= ~(HDMA_V0_STOP_INT_MASK | HDMA_V0_ABORT_INT_MASK);
@@ -119,7 +174,8 @@ static void hdma_init_imwr(struct axl_pcie_aipu_dev *axldev)
 			SET_RW_32_CH(hdma, dir, msi_msgdata, i,
 				     axldev->irq_msi.data);
 		} else {
-			SET_RW_32_CH(hdma, dir, msi_msgdata, i, MSI_WR_CH0 + i);
+			SET_RW_32_CH(hdma, dir, msi_msgdata, i,
+				     PMSI_DMA_WR_CH0 + i);
 		}
 		setup = GET_RW_32_CH(hdma, dir, int_setup, i);
 		setup &= ~(HDMA_V0_STOP_INT_MASK | HDMA_V0_ABORT_INT_MASK);
@@ -147,6 +203,8 @@ static inline int dma_wait_irq(struct axl_pcie_aipu_dev *axldev,
 	enum dw_hdma_dir dir = dma_wrk->flags & DMABUF_XFER_FLAG_READ ?
 				       DW_HDMA_DIR_WRITE :
 				       DW_HDMA_DIR_READ;
+	SET_RW_32_CH(hdma, dir, cycle_sync, dma_wrk->channel,
+		     HDMA_V0_CONSUMER_CYCLE_STAT | HDMA_V0_CONSUMER_CYCLE_BIT);
 
 	ch_stat = GET_RW_32_CH(hdma, dir, ch_stat, dma_wrk->channel);
 
@@ -160,13 +218,15 @@ static inline int dma_wait_irq(struct axl_pcie_aipu_dev *axldev,
 		axldev->irq_wrk[dma_wrk->id].timeout);
 
 	ch_stat = GET_RW_32_CH(hdma, dir, ch_stat, dma_wrk->channel);
+	SET_RW_32_CH(hdma, dir, int_clear, dma_wrk->channel,
+		     (HDMA_V0_ABORT_INT_MASK | HDMA_V0_STOP_INT_MASK));
 	if (err == 0) {
 		dev_err(&pdev->dev,
 			"DMA %s CH%d timeout (irq %d, status 0x%x)\n", mode,
 			dma_wrk->channel, dma_wrk->id, ch_stat);
 		if (ch_stat != STATUS_REG_STOPPED) {
 			dma_wrk->status = -ETIMEDOUT;
-			sctx->async_dma_xfer = ASYNC_XFER_TIMEOUT;
+			atomic_set(&sctx->async_dma_xfer, ASYNC_XFER_TIMEOUT);
 			dma_wrk->qctrl->num_err++;
 			return -1;
 		}
@@ -175,10 +235,11 @@ static inline int dma_wait_irq(struct axl_pcie_aipu_dev *axldev,
 		dev_err(&pdev->dev, "DMA error %s CH%d (status 0x%x)\n", mode,
 			dma_wrk->channel, ch_stat);
 		dma_wrk->status = -EIO;
-		sctx->async_dma_xfer = ASYNC_XFER_FAIL;
+		atomic_set(&sctx->async_dma_xfer, ASYNC_XFER_FAIL);
 		dma_wrk->qctrl->num_err++;
 		return -1;
 	}
+	get_max_duration(dma_wrk);
 	return 0;
 }
 #define DMA_POLL_TIMEOUT 100000
@@ -216,7 +277,7 @@ static inline int dma_wait_poll(struct axl_pcie_aipu_dev *axldev,
 	ch_stat = GET_RW_32_CH(hdma, dir, ch_stat, dma_wrk->channel);
 	if ((ch_stat != STATUS_REG_STOPPED) && !timeout) {
 		dma_wrk->status = -ETIMEDOUT;
-		sctx->async_dma_xfer = ASYNC_XFER_TIMEOUT;
+		atomic_set(&sctx->async_dma_xfer, ASYNC_XFER_TIMEOUT);
 		dma_wrk->qctrl->num_err++;
 		return -1;
 	}
@@ -224,7 +285,7 @@ static inline int dma_wait_poll(struct axl_pcie_aipu_dev *axldev,
 		dev_err(&pdev->dev, "DMA Poll error %s CH%d (stat 0x%x %d)\n",
 			mode, dma_wrk->channel, ch_stat, timeout);
 		dma_wrk->status = -EIO;
-		sctx->async_dma_xfer = ASYNC_XFER_FAIL;
+		atomic_set(&sctx->async_dma_xfer, ASYNC_XFER_FAIL);
 		dma_wrk->qctrl->num_err++;
 		return -1;
 	}
@@ -239,28 +300,29 @@ static inline int dma_wait(struct axl_pcie_aipu_dev *axldev,
 	return dma_wait_irq(axldev, dma_wrk);
 }
 
-static void hdma_dma_job(struct dma_wrk *dma_wrk)
+static void axl_aipu_hdma_dma_job(struct dma_wrk *dma_wrk)
 {
 	struct axl_pcie_aipu_dev *axldev = dma_wrk->axldev;
 	struct pci_dev *pdev = axldev->pdev;
 
-	volatile struct dw_hdma_v0_regs *hdma = axldev->dma;
 	volatile struct dw_hdma_ll_buf *hwlldch;
 	volatile struct dw_hdma_ll_buf *lldch;
+	volatile struct dw_hdma_v0_llp *llp;
 
 	struct sg_table *table = dma_wrk->table;
 	struct scatterlist *sg;
 	int i, n, channel, id;
 	size_t tr_size = 0, total_size = 0;
 	u64 axi;
-	u32 setup;
 	enum dw_hdma_dir dir = dma_wrk->flags & DMABUF_XFER_FLAG_READ ?
 				       DW_HDMA_DIR_WRITE :
 				       DW_HDMA_DIR_READ;
 	const char *mode = dma_wrk->flags & DMABUF_XFER_FLAG_READ ? "WR" : "RD";
 
-	hwlldch = (struct dw_hdma_ll_buf *)(HDMA_LINKED_LIST_DESC_BASE);
-	lldch = axldev->vl2base + HDMA_LINKED_LIST_DESC_OFF;
+	hwlldch =
+		(struct dw_hdma_ll_buf *)axl_aipu_hdma_get_ll_desc_base(axldev);
+	lldch = axldev->vl2base + axldev->desc_offset;
+
 	dma_wrk->status = 0;
 
 	axi = dma_wrk->axi;
@@ -271,24 +333,12 @@ static void hdma_dma_job(struct dma_wrk *dma_wrk)
 	dev_dbg(&pdev->dev, "DMA %s CH%d work (%p)\n", mode, dma_wrk->channel,
 		dma_wrk);
 
-	setup = GET_RW_32_CH(hdma, dir, int_setup, dma_wrk->channel);
-	setup &= ~(HDMA_V0_STOP_INT_MASK | HDMA_V0_ABORT_INT_MASK);
-	if (!dma_poll) {
-		setup |= HDMA_V0_REMOTE_STOP_INT_EN |
-			 HDMA_V0_REMOTE_ABORT_INT_EN;
-	}
-	SET_RW_32_CH(hdma, dir, int_setup, dma_wrk->channel, setup);
-
 	for (n = dma_wrk->num_sgt; n < table->nents; n += i) {
-		dev_dbg(&pdev->dev, "DMA %s CH%d (%d of %d)\n", mode, channel,
-			n, table->nents);
-		SET_RW_32_CH(hdma, dir, control1, channel, HDMA_V0_LINKLIST_EN);
-		SET_RW_32_CH(hdma, dir, cycle_sync, channel,
-			     HDMA_V0_CONSUMER_CYCLE_STAT |
-				     HDMA_V0_CONSUMER_CYCLE_BIT);
-
-		dev_dbg(&pdev->dev, "DMA %s CH%d (%llx)\n", mode, channel,
+		dev_dbg(&pdev->dev, "DMA %s CH%d (%d of %d) lldsc 0x%llx\n",
+			mode, channel, n, table->nents,
 			__get_ll_base(hwlldch, dir, channel));
+		axl_aipu_hdma_int_setup(dma_wrk);
+
 		total_size = 0;
 		for (i = 0; i < DW_HDMA_LL_MAX_NUM && i < (table->nents - n);
 		     sg = sg_next(sg)) {
@@ -357,7 +407,12 @@ static void hdma_dma_job(struct dma_wrk *dma_wrk)
 				"GO OUT of max channel desc number %d 0x%lx 0x%lx desc\n",
 				i, total_size, dma_wrk->size);
 
-		LL_SET_RW_32_CH(lldch, dir, channel, i, control, 0);
+		llp = __get_llp(lldch, dir, channel, i);
+		llp->control = DW_HDMA_V0_LLP | DW_HDMA_V0_RIE |
+			       DW_HDMA_V0_TCB | DW_HDMA_V0_CB;
+		llp->llp.reg = (uint64_t)__get_llp(hwlldch, dir, channel, i);
+		LL_SET_RW_32_CH(lldch, dir, channel, i + 1, control, 0);
+
 		mb();
 		LL_GET_RW_32_CH(lldch, dir, channel, i, control);
 		if (!dma_poll) {
@@ -374,19 +429,74 @@ static void hdma_dma_job(struct dma_wrk *dma_wrk)
 	if ((dir == DW_HDMA_DIR_WRITE) && enable_dmabuf_sync)
 		dma_sync_sg_for_cpu(&pdev->dev, table->sgl, table->nents,
 				    DMA_FROM_DEVICE);
+	get_max_duration(dma_wrk);
 }
 
-static struct axl_dev_fops hdma_fops = {
-	.dma_irq_ck = hdma_dma_irq_ck,
-	.dma_enable_ctrl = hdma_enable_ctrl,
-	.dma_job_submit = hdma_dma_job,
-	.dma_init_imwr = hdma_init_imwr,
+static void axl_aipu_hdma_dma_p2p_job(struct dma_wrk *dma_wrk)
+{
+	struct axl_pcie_aipu_dev *axldev = dma_wrk->axldev;
+	struct pci_dev *pdev = axldev->pdev;
 
-	.dev_debugfs_init = hdma_dev_debugfs_init,
-	.dev_debugfs_exit = hdma_dev_debugfs_exit,
+	volatile struct dw_hdma_v0_regs *hdma = axldev->dma;
+
+	int channel, id;
+	__u64 axi, p2pphy;
+	enum dw_hdma_dir dir = dma_wrk->flags & DMABUF_XFER_FLAG_READ ?
+				       DW_HDMA_DIR_WRITE :
+				       DW_HDMA_DIR_READ;
+	const char *mode = dma_wrk->flags & DMABUF_XFER_FLAG_READ ? "WR" : "RD";
+
+	dma_wrk->status = 0;
+
+	axi = dma_wrk->axi;
+	p2pphy = dma_wrk->p2pphy;
+	channel = dma_wrk->channel;
+	id = dma_wrk->id;
+
+	dev_dbg(&pdev->dev, "DMA P2P %s CH%d work (%p)\n", mode,
+		dma_wrk->channel, dma_wrk);
+	SET_RW_32_CH(hdma, dir, watermark_en, channel, WATERMARK_RWIE);
+	SET_RW_32_CH(hdma, dir, transfer_size, channel, dma_wrk->size);
+	SET_RW_32_CH(hdma, dir, control1, channel, 0);
+
+	if (dir == DW_HDMA_DIR_WRITE) {
+		SET_RW_32_CH(hdma, dir, sar.lsb, channel, _LSB(axi));
+		SET_RW_32_CH(hdma, dir, sar.msb, channel, _MSB(axi));
+		SET_RW_32_CH(hdma, dir, dar.lsb, channel, _LSB(p2pphy));
+		SET_RW_32_CH(hdma, dir, dar.msb, channel, _MSB(p2pphy));
+	} else {
+		SET_RW_32_CH(hdma, dir, dar.lsb, channel, _LSB(axi));
+		SET_RW_32_CH(hdma, dir, dar.msb, channel, _MSB(axi));
+		SET_RW_32_CH(hdma, dir, sar.lsb, channel, _LSB(p2pphy));
+		SET_RW_32_CH(hdma, dir, sar.msb, channel, _MSB(p2pphy));
+	}
+	dev_dbg(&pdev->dev,
+		"CH%d CTRL=0x%x | SIZE=0x%x | SAR=0x%x%08x | DAR=0x%x%08x\n",
+		channel, GET_RW_32_CH(hdma, dir, control1, channel),
+		GET_RW_32_CH(hdma, dir, transfer_size, channel),
+		GET_RW_32_CH(hdma, dir, sar.msb, channel),
+		GET_RW_32_CH(hdma, dir, sar.lsb, channel),
+		GET_RW_32_CH(hdma, dir, dar.msb, channel),
+		GET_RW_32_CH(hdma, dir, dar.lsb, channel));
+	if (!dma_poll) {
+		reinit_completion(&axldev->irq_wrk[dma_wrk->id].irq_done);
+	}
+
+	(void)dma_wait(axldev, dma_wrk);
+}
+static struct axl_dev_fops axl_aipu_hdma_fops = {
+	.dma_irq_ck = axl_aipu_hdma_dma_irq_ck,
+	.dma_enable_ctrl = axl_aipu_hdma_enable_ctrl,
+	.dma_job_submit = axl_aipu_hdma_dma_job,
+	.dma_init_imwr = axl_aipu_hdma_init_imwr,
+	.dma_p2p_job_submit = axl_aipu_hdma_dma_p2p_job,
+	.dev_dynmem_init = axl_aipu_hdma_dev_dynmem_init,
+
+	.dev_debugfs_init = axl_aipu_hdma_dev_debugfs_init,
+	.dev_debugfs_exit = axl_aipu_hdma_dev_debugfs_exit,
 };
 
-void hdma_register_dev_fops(struct axl_pcie_aipu_dev *axldev)
+void axl_aipu_hdma_register_dev_fops(struct axl_pcie_aipu_dev *axldev)
 {
-	axldev->fops = &hdma_fops;
+	axldev->fops = &axl_aipu_hdma_fops;
 }

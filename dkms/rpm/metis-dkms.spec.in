@@ -1,0 +1,66 @@
+Name:           @DRIVER_NAME@-dkms
+Version:        @DRIVER_VERSION@
+Release:        1%{?dist}
+Summary:        Axelera Metis PCIe driver in DKMS format
+License:        GPLv2
+URL:            https://axelera.ai
+
+BuildArch:      noarch
+Requires:       dkms
+Requires:       kernel-devel
+Requires:       make
+Requires:       gcc
+
+Provides:       @DRIVER_NAME@-kernel
+
+%description
+Axelera Metis PCIe driver packaged with DKMS (Dynamic Kernel Module Support)
+for automatic rebuilding on kernel updates.
+
+%install
+# Create directories
+install -d %{buildroot}/usr/src/@DRIVER_NAME@-@DRIVER_VERSION@/driver
+install -d %{buildroot}/etc/udev/rules.d
+
+# Install driver source into driver/ subdirectory (matches KBUILD_PATH in dkms.conf)
+cp -r %{_sourcedir}/driver/* %{buildroot}/usr/src/@DRIVER_NAME@-@DRIVER_VERSION@/driver/
+
+# Install dkms.conf
+install -m 644 %{_sourcedir}/dkms.conf %{buildroot}/usr/src/@DRIVER_NAME@-@DRIVER_VERSION@/
+
+# Install udev rules
+install -m 644 %{_sourcedir}/extra/etc/udev/rules.d/72-axelera.rules %{buildroot}/etc/udev/rules.d/
+
+# Install common scripts
+install -d %{buildroot}/usr/share/@DRIVER_NAME@-dkms/scripts
+install -m 755 %{_sourcedir}/scripts/post-install.sh %{buildroot}/usr/share/@DRIVER_NAME@-dkms/scripts/
+install -m 755 %{_sourcedir}/scripts/pre-remove.sh %{buildroot}/usr/share/@DRIVER_NAME@-dkms/scripts/
+
+%files
+/usr/src/@DRIVER_NAME@-@DRIVER_VERSION@
+/etc/udev/rules.d/72-axelera.rules
+/usr/share/@DRIVER_NAME@-dkms
+
+%post
+# Add module to DKMS
+dkms add -m @DRIVER_NAME@ -v @DRIVER_VERSION@ --rpm_safe_upgrade || :
+
+# Build and install for current kernel
+dkms build -m @DRIVER_NAME@ -v @DRIVER_VERSION@ || :
+dkms install -m @DRIVER_NAME@ -v @DRIVER_VERSION@ --force || :
+
+# Run common post-install script
+/usr/share/@DRIVER_NAME@-dkms/scripts/post-install.sh || :
+
+%preun
+# Run common pre-remove script (only on uninstall, not upgrade)
+if [ "$1" -eq 0 ]; then
+    /usr/share/@DRIVER_NAME@-dkms/scripts/pre-remove.sh || exit 1
+fi
+
+# Remove module from DKMS
+dkms remove -m @DRIVER_NAME@ -v @DRIVER_VERSION@ --all --rpm_safe_upgrade || :
+
+%changelog
+* Wed Jan 01 2025 Axelera AI <axelera@axelera.ai> - @DRIVER_VERSION@-1
+- DKMS package for Axelera Metis PCIe driver

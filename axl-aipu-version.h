@@ -1,0 +1,6 @@
+#ifndef __AXL_AIPU_VERSION_H__
+#define __AXL_AIPU_VERSION_H__
+
+#define DRIVER_VERSION "1.4.16"
+
+#endif /* __AXL_AIPU_VERSION_H__ */

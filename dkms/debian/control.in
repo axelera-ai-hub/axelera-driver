@@ -1,0 +1,13 @@
+Source: @DRIVER_NAME@-dkms
+Section: kernel
+Priority: optional
+Maintainer: Axelera AI
+Build-Depends: debhelper-compat (= 12), dkms
+Standards-Version: 4.4.1
+
+Package: @DRIVER_NAME@-dkms
+Architecture: all
+Section: kernel
+Depends: ${misc:Depends}
+Provides: @DRIVER_NAME@-kernel
+Description: Axelera @DRIVER_NAME@ driver in DKMS format.

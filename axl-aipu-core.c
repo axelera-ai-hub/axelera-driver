@@ -35,12 +35,15 @@
 #include <linux/delay.h>
 #include <linux/dma-buf.h>
 #include <linux/poll.h>
+#include <linux/idr.h>
+#include <linux/kref.h>
 
-#include "metis-dmabuf.h"
-#include "metis.h"
-#include "metis-edma-core.h"
-#include "metis-hdma-core.h"
-#include "metis-version.h"
+#include "axl-aipu-dmabuf.h"
+#include "axl-aipu.h"
+#include "axl-aipu-edma-core.h"
+#include "axl-aipu-hdma-core.h"
+#include "axl-aipu-version.h"
+#include "axl-aipu-msi.h"
 
 #define DRIVER_AUTHOR "Axelera AI"
 #define DRIVER_DESC   "Axelera AI AIPU driver"
@@ -54,26 +57,26 @@
 #define DEVICE_CLASS_NAME \
 	"metis" // keep metis just to be backward compatible with old SDK
 
-#define AXELERA_VENDOR_ID	 0x1F9D
-#define AXLAIPU_ALPHA_DEVICE_ID	 0x11AA
-#define AXLAIPU_OMEGA_DEVICE_ID	 0x1100
-#define AXLAIPU_EUROPA_DEVICE_ID 0x0001
+#define AXELERA_VENDOR_ID	  0x1F9D
+#define AXL_AIPU_ALPHA_DEVICE_ID  0x11AA
+#define AXL_AIPU_OMEGA_DEVICE_ID  0x1100
+#define AXL_AIPU_EUROPA_DEVICE_ID 0x0001
 
 #define METIS_CLASS_CODE  0x1200
 #define METIS_REVISION_ID 0x0   
 
-#define AXLAIPU_MAX_MINORS 256
+#define AXL_AIPU_MAX_MINORS 256
 
-static unsigned char axlaipu_devices[AXLAIPU_MAX_MINORS] = {};
-struct dentry *axlaipu_debugfs_root;
+static DEFINE_IDA(axl_aipu_minor_ida);
+struct dentry *axl_aipu_debugfs_root;
 
-static struct class *axlaipu_class;
-static int axlaipu_major;
+static struct class *axl_aipu_class;
+static int axl_aipu_major;
 
 unsigned int dma_timeout = 2;
 module_param(dma_timeout, uint, 0644);
 MODULE_PARM_DESC(dma_timeout, "DMA timeout in seconds (default 2 sec)");
-static unsigned int irq_timeout = 1;
+unsigned int irq_timeout = 1;
 module_param(irq_timeout, uint, 0644);
 MODULE_PARM_DESC(irq_timeout, "IRQ timeout in seconds (default 1 sec)");
 MODULE_PARM_DESC(enable_dmabuf_sync,
@@ -86,140 +89,31 @@ unsigned int dma_poll = 0;
 module_param(dma_poll, uint, 0644);
 MODULE_PARM_DESC(dma_poll, "DMA polling mode (default 0 disabled, 1 enabled)");
 
-static void axlaipu_dma_imwr_restore(struct axl_pcie_aipu_dev *axldev);
-static void axl_aipu_config_dev_dma(struct axl_pcie_aipu_dev *axldev);
+unsigned int europa_veloce = 0;
+module_param(europa_veloce, uint, 0644);
+MODULE_PARM_DESC(europa_veloce,
+		 "Enable europa veloce mode default 0 disabled, 1 enabled)");
+
+unsigned int enable_sg_host_dma = 0;
+module_param(enable_sg_host_dma, uint, 0644);
+MODULE_PARM_DESC(
+	enable_sg_host_dma,
+	"Enable host sglist and xfer via dma engine (default 0 disabled)");
+
+static unsigned int dma_trace_entries = 4000;
+module_param(dma_trace_entries, uint, 0644);
+MODULE_PARM_DESC(dma_trace_entries,
+		 "DMA trace buffer entries (64 - 65536, default 4000)");
+
+static void axl_aipu_dma_imwr_restore(struct axl_pcie_aipu_dev *axldev);
 static void axl_aipu_disable_dev_dma(struct pci_dev *pdev);
+static void axl_aipu_dev_debugfs_init(struct axl_pcie_aipu_dev *axldev);
 
 static const struct vm_operations_struct axl_physical_vm_ops = {
 #ifdef CONFIG_HAVE_IOREMAP_PROT
 	.access = generic_access_phys,
 #endif
 };
-
-/* The bridge should allocate at least 47MB; for some hosts, this is allocated only after a bridge rescan */
-#define EXPECTED_MEM_BEHIND_BRIDGE_SIZE (47 * 1024 * 1024)
-
-static int apply_resets_if_needed(void)
-{
-	struct pci_dev *target_device = NULL;
-	struct pci_dev *bridge = NULL;
-	struct pci_bus *bus = NULL;
-	u32 memory_base, memory_limit;
-	int ret = 0;
-	bool device_found = false;
-	struct resource res;
-	u16 mem_base_lo, mem_limit_lo;
-	unsigned long base, limit;
-	struct pci_bus_region region;
-
-	/* Check for the specified devices */
-	static const struct {
-		u16 device_id;
-		const char *device_name;
-	} devices[] = { { AXLAIPU_ALPHA_DEVICE_ID, "AXLAIPU_ALPHA_DEVICE_ID" },
-			{ AXLAIPU_OMEGA_DEVICE_ID,
-			  "AXLAIPU_OMEGA_DEVICE_ID" } };
-
-	int i;
-	for (i = 0; i < ARRAY_SIZE(devices); i++) {
-		target_device = pci_get_device(AXELERA_VENDOR_ID,
-					       devices[i].device_id, NULL);
-		if (target_device) {
-			dev_info(&target_device->dev,
-				 "Found target device: %s\n",
-				 devices[i].device_name);
-			device_found = true;
-			break;
-		}
-	}
-
-	if (!device_found) {
-		pr_info("No target devices found, skipping bridge reset\n");
-		return 0; /* No reset needed */
-	}
-
-	dev_info(&target_device->dev, "Found target device: %s\n",
-		 pci_name(target_device));
-
-	/* Find the bridge the target device is connected to */
-	bridge = target_device->bus ? target_device->bus->self : NULL;
-	if (!bridge) {
-		pr_err("Failed to find the bridge device connected to target device\n");
-		pci_dev_put(target_device);
-		return -ENODEV;
-	}
-
-	dev_info(&bridge->dev, "Found bridge device: %s\n", pci_name(bridge));
-
-	/* Read and decode Memory Behind Bridge */
-	pci_read_config_word(bridge, PCI_MEMORY_BASE, &mem_base_lo);
-	pci_read_config_word(bridge, PCI_MEMORY_LIMIT, &mem_limit_lo);
-
-	base = ((unsigned long)mem_base_lo & PCI_MEMORY_RANGE_MASK) << 16;
-	limit = ((unsigned long)mem_limit_lo & PCI_MEMORY_RANGE_MASK) << 16;
-
-	if (base <= limit) {
-		res.flags = (mem_base_lo & PCI_MEMORY_RANGE_TYPE_MASK) |
-			    IORESOURCE_MEM;
-		region.start = base;
-		region.end = limit + 0xfffff;
-		pcibios_bus_to_resource(bridge->bus, &res, &region);
-		dev_info(&bridge->dev, "Bridge window: %pR\n", &res);
-	} else {
-		pr_err("Invalid memory base and limit values: base=0x%lx, limit=0x%lx\n",
-		       base, limit);
-		pci_dev_put(target_device);
-		return -EINVAL;
-	}
-
-	memory_base = res.start;
-	memory_limit = res.end;
-
-	dev_info(&bridge->dev, "Decoded memory behind bridge: %08llx-%08llx\n",
-		 res.start, res.end);
-
-	if ((memory_limit - memory_base) >= EXPECTED_MEM_BEHIND_BRIDGE_SIZE) {
-		dev_info(
-			&bridge->dev,
-			"Memory behind bridge is sufficient. Skipping reset.\n");
-		pci_dev_put(target_device);
-		return 0; /* Skip reset */
-	}
-
-	dev_info(
-		&bridge->dev,
-		"Memory behind bridge is insufficient. Proceeding with reset.\n");
-
-	/* Ensure the bridge has a valid bus */
-	bus = bridge->bus;
-	if (!bus) {
-		pr_err("Bridge device has no associated bus\n");
-		pci_dev_put(target_device);
-		return -ENODEV;
-	}
-
-	/* Remove the bridge */
-	dev_info(&bridge->dev, "Removing bridge device: %s\n",
-		 pci_name(bridge));
-	pci_stop_and_remove_bus_device_locked(bridge);
-
-	/* Rescan the PCI bus */
-	ret = pci_rescan_bus(bus);
-	if (ret <
-	    0) { /* pci_rescan_bus returns the max subordinate bus, not an error code */
-		pr_err("Unexpected error during PCI bus rescan\n");
-		pci_dev_put(target_device);
-		return -EIO;
-	}
-
-	dev_info(&bridge->dev,
-		 "Bridge removal and PCIe rescan completed successfully\n");
-
-	/* Release reference to the target device */
-	pci_dev_put(target_device);
-
-	return 0;
-}
 
 static int sysctrl_open(struct inode *inode, struct file *file)
 {
@@ -235,6 +129,7 @@ static int sysctrl_open(struct inode *inode, struct file *file)
 	if (!sys_ctx)
 		return -ENOMEM;
 
+	kref_init(&sys_ctx->refcount);
 	INIT_LIST_HEAD(&sys_ctx->node);
 	init_waitqueue_head(&sys_ctx->poll_wait_queue);
 	atomic_set(&sys_ctx->poll_event_cnt, 0);
@@ -246,21 +141,159 @@ static int sysctrl_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int sysctrl_release(struct inode *inode, struct file *file)
+/* Deferred cleanup for sys_ctx when DMA work is pending */
+struct sys_ctx_cleanup {
+	struct work_struct work;
+	struct sysctrl_ctx *sys_ctx;
+	struct dma_wrk *dma_wrk;
+};
+
+static void axl_aipu_sys_ctx_cleanup_dmabuf(struct sysctrl_ctx *sys_ctx)
 {
-	struct sysctrl_ctx *sys_ctx = file->private_data;
-	struct sysctrl_ctx *sctx_msi;
+	struct dmabuf_imp *di = &sys_ctx->di;
 	struct axl_pcie_aipu_dev *axldev = sys_ctx->axldev;
 	struct pci_dev *pdev = axldev->pdev;
-	struct dmabuf_imp *di = &sys_ctx->di;
-	struct irq_wrk *irq_wrk = axldev->irq_wrk;
-	int pos, i;
 
-	if (sys_ctx->msg_flag)
-		mutex_unlock(&axldev->msg_mutex);
+	if (di->dmabuf) {
+		dev_dbg(&pdev->dev, "Release dmabuf\n");
+		dma_buf_unmap_attachment(di->attachment, di->table,
+					 DMA_BIDIRECTIONAL);
+		dma_buf_detach(di->dmabuf, di->attachment);
+		dma_buf_put(di->dmabuf);
+		di->dmabuf = NULL;
+	}
+}
+
+static void axl_aipu_sys_ctx_cleanup_final(struct sysctrl_ctx *sys_ctx)
+{
+	struct axl_pcie_aipu_dev *axldev = sys_ctx->axldev;
+	struct pci_dev *pdev = axldev->pdev;
+
+	wake_up_interruptible_poll(&sys_ctx->poll_wait_queue, EPOLLIN);
+	dev_dbg(&pdev->dev, "sys_ctx freed %p\n", sys_ctx);
+	kfree(sys_ctx);
+}
+
+static void axl_aipu_sys_ctx_cleanup_func(struct work_struct *work)
+{
+	struct sys_ctx_cleanup *cleanup =
+		container_of(work, struct sys_ctx_cleanup, work);
+	struct sysctrl_ctx *sys_ctx = cleanup->sys_ctx;
+	struct dma_wrk *dma_wrk = cleanup->dma_wrk;
+	struct axl_pcie_aipu_dev *axldev = sys_ctx->axldev;
+	struct pci_dev *pdev = axldev->pdev;
+
+	dev_dbg(&pdev->dev, "Async cleanup: waiting for dma_wrk %p\n", dma_wrk);
+
+	/* Wait for work to complete */
+	flush_work(&dma_wrk->work);
+
+	/* Now safe to release dmabuf and free sys_ctx */
+	kref_put(&dma_wrk->refcount, axl_aipu_dma_wrk_release);
+	axl_aipu_sys_ctx_cleanup_dmabuf(sys_ctx);
+
+	dev_dbg(&pdev->dev, "Async cleanup: sys_ctx freed %p\n", sys_ctx);
+	kfree(sys_ctx);
+	kfree(cleanup);
+}
+
+static void
+axl_aipu_sys_ctx_release_from_work_context(struct sysctrl_ctx *sys_ctx,
+					   struct dma_wrk *dma_wrk)
+{
+	struct axl_pcie_aipu_dev *axldev = sys_ctx->axldev;
+	struct pci_dev *pdev = axldev->pdev;
+
+	dev_dbg(&pdev->dev, "Release from work context, skipping flush\n");
+
+	/* Release sys_ctx's reference to dma_wrk */
+	kref_put(&dma_wrk->refcount, axl_aipu_dma_wrk_release);
+
+	/* Normal cleanup */
+	axl_aipu_sys_ctx_cleanup_dmabuf(sys_ctx);
+	axl_aipu_sys_ctx_cleanup_final(sys_ctx);
+}
+
+static bool axl_aipu_sys_ctx_schedule_async_cleanup(struct sysctrl_ctx *sys_ctx,
+						    struct dma_wrk *dma_wrk)
+{
+	struct axl_pcie_aipu_dev *axldev = sys_ctx->axldev;
+	struct pci_dev *pdev = axldev->pdev;
+	struct sys_ctx_cleanup *cleanup;
+
+	dev_dbg(&pdev->dev, "Scheduling async cleanup for dma_wrk %p\n",
+		dma_wrk);
+
+	cleanup = kmalloc(sizeof(*cleanup), GFP_ATOMIC);
+	if (!cleanup) {
+		dev_warn(&pdev->dev,
+			 "Failed to allocate cleanup, falling back to sync\n");
+		return false;
+	}
+
+	INIT_WORK(&cleanup->work, axl_aipu_sys_ctx_cleanup_func);
+	cleanup->sys_ctx = sys_ctx;
+	cleanup->dma_wrk = dma_wrk;
+	schedule_work(&cleanup->work);
+
+	return true; /* sys_ctx will be freed by cleanup worker */
+}
+
+static void axl_aipu_sys_ctx_release_sync_fallback(struct sysctrl_ctx *sys_ctx,
+						   struct dma_wrk *dma_wrk)
+{
+	dev_dbg(&sys_ctx->axldev->pdev->dev, "Sync fallback cleanup\n");
+
+	/* Fallback to blocking cleanup */
+	flush_work(&dma_wrk->work);
+	kref_put(&dma_wrk->refcount, axl_aipu_dma_wrk_release);
+	axl_aipu_sys_ctx_cleanup_dmabuf(sys_ctx);
+	axl_aipu_sys_ctx_cleanup_final(sys_ctx);
+}
+
+void axl_aipu_sys_ctx_release(struct kref *kref)
+{
+	struct sysctrl_ctx *sys_ctx =
+		container_of(kref, struct sysctrl_ctx, refcount);
+	struct axl_pcie_aipu_dev *axldev = sys_ctx->axldev;
+	struct pci_dev *pdev = axldev->pdev;
+	struct dma_wrk *dma_wrk;
+
+	dma_wrk = xchg(&sys_ctx->dma_wrk, NULL);
+	if (!dma_wrk) {
+		/* No pending DMA work - normal cleanup */
+		axl_aipu_sys_ctx_cleanup_dmabuf(sys_ctx);
+		axl_aipu_sys_ctx_cleanup_final(sys_ctx);
+		return;
+	}
+
+	/* DMA work is pending */
+	dev_dbg(&pdev->dev, "sys_ctx releasing dma_wrk %p\n", dma_wrk);
+
+	if (current_work() == &dma_wrk->work) {
+		/* Called from work context - cannot flush */
+		axl_aipu_sys_ctx_release_from_work_context(sys_ctx, dma_wrk);
+		return;
+	}
+
+	/* Schedule async cleanup to avoid blocking close() */
+	if (axl_aipu_sys_ctx_schedule_async_cleanup(sys_ctx, dma_wrk))
+		return; /* sys_ctx will be freed by cleanup worker */
+
+	/* Async cleanup failed - fallback to sync */
+	axl_aipu_sys_ctx_release_sync_fallback(sys_ctx, dma_wrk);
+}
+
+static inline void axl_aipu_sysctrl_poll_unregister(struct sysctrl_ctx *sys_ctx)
+{
+	struct axl_pcie_aipu_dev *axldev = sys_ctx->axldev;
+	struct irq_wrk *irq_wrk = axldev->irq_wrk;
+	struct pci_dev *pdev = axldev->pdev;
+	struct sysctrl_ctx *sctx_msi;
+	int i;
 
 	spin_lock_irq(&axldev->msi_lock);
-	for (i = 0; i < MAX_MSI; i++) {
+	for (i = 0; i < axldev->max_msi; i++) {
 		if (list_empty(&irq_wrk[i].sctx_list))
 			continue;
 		list_for_each_entry(sctx_msi, &irq_wrk[i].sctx_list, node)
@@ -275,35 +308,37 @@ static int sysctrl_release(struct inode *inode, struct file *file)
 		}
 	}
 	spin_unlock_irq(&axldev->msi_lock);
+}
 
+static inline void axl_aipu_sysctrl_ctx_release(struct sysctrl_ctx *sys_ctx)
+{
+	struct axl_pcie_aipu_dev *axldev = sys_ctx->axldev;
+	struct pci_dev *pdev = axldev->pdev;
 	mutex_lock(&axldev->mutex);
 	if (sys_ctx->ctx_mask) {
-		pos = first_set_bit(sys_ctx->ctx_mask);
-		dev_dbg(&pdev->dev, "Release (%d) 0x%llx %p by %d\n", pos,
-			axldev->glob_ctx_mask, file->private_data,
-			current->pid);
+		int pos = first_set_bit(sys_ctx->ctx_mask);
+		dev_dbg(&pdev->dev, "Release (%d) 0x%llx by %d\n", pos,
+			axldev->glob_ctx_mask, current->pid);
 		axldev->glob_ctx_mask &= ~(sys_ctx->ctx_mask);
 		axldev->ctx_mask[pos] = 0;
 	} else
-		dev_dbg(&pdev->dev, "Release no ctx allocated %p by %d\n",
-			file->private_data, current->pid);
-
+		dev_dbg(&pdev->dev, "Release no ctx allocated by %d\n",
+			current->pid);
 	mutex_unlock(&axldev->mutex);
-	if (sys_ctx->dma_wrk) {
-		flush_work(&sys_ctx->dma_wrk->work);
-		kfree(sys_ctx->dma_wrk);
-	}
-	if (di->dmabuf) {
-		dev_dbg(&pdev->dev, "Force release dmabuf\n");
-		dma_buf_unmap_attachment(di->attachment, di->table,
-					 DMA_BIDIRECTIONAL);
-		dma_buf_detach(di->dmabuf, di->attachment);
-		dma_buf_put(di->dmabuf);
-	}
+}
 
-	wake_up_interruptible_poll(&sys_ctx->poll_wait_queue, EPOLLIN);
+static int sysctrl_release(struct inode *inode, struct file *file)
+{
+	struct sysctrl_ctx *sys_ctx = file->private_data;
+	struct axl_pcie_aipu_dev *axldev = sys_ctx->axldev;
 
-	kfree(sys_ctx);
+	if (sys_ctx->msg_flag)
+		mutex_unlock(&axldev->msg_mutex);
+
+	axl_aipu_sysctrl_poll_unregister(sys_ctx);
+	axl_aipu_sysctrl_ctx_release(sys_ctx);
+
+	kref_put(&sys_ctx->refcount, axl_aipu_sys_ctx_release);
 	return 0;
 }
 
@@ -345,7 +380,7 @@ static __poll_t sysctrl_poll(struct file *file, poll_table *wait)
 	return 0;
 }
 
-static struct file_operations axlaipu_file_fops = {
+static struct file_operations axl_aipu_file_fops = {
 	.owner = THIS_MODULE,
 	.open = sysctrl_open,
 	.release = sysctrl_release,
@@ -355,15 +390,15 @@ static struct file_operations axlaipu_file_fops = {
 	.poll = sysctrl_poll,
 };
 
-static ssize_t axlaipu_restore_show(struct device *dev,
-				    struct device_attribute *attr, char *buf)
+static ssize_t axl_aipu_restore_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
 {
 	struct axl_pcie_aipu_dev *axldev = dev_get_drvdata(dev);
 	return scnprintf(buf, PAGE_SIZE, "%d\n", axldev->dlllarc);
 }
-static ssize_t axlaipu_restore_store(struct device *dev,
-				     struct device_attribute *attr,
-				     const char *buf, size_t count)
+static ssize_t axl_aipu_restore_store(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t count)
 {
 	struct axl_pcie_aipu_dev *axldev = dev_get_drvdata(dev);
 	struct pci_dev *pdev = axldev->pdev;
@@ -383,16 +418,16 @@ static ssize_t axlaipu_restore_store(struct device *dev,
 	}
 	return count;
 }
-static DEVICE_ATTR(axlaipu_restore, 0664, axlaipu_restore_show,
-		   axlaipu_restore_store);
+static DEVICE_ATTR(axl_aipu_restore, 0664, axl_aipu_restore_show,
+		   axl_aipu_restore_store);
 
-static struct attribute *axlaipu_pcie_axl_attrs[] = {
-	&dev_attr_axlaipu_restore.attr,
+static struct attribute *axl_aipu_pcie_axl_attrs[] = {
+	&dev_attr_axl_aipu_restore.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(axlaipu_pcie_axl);
+ATTRIBUTE_GROUPS(axl_aipu_pcie_axl);
 
-static int axlaipu_recovery(void *data)
+static int axl_aipu_recovery(void *data)
 {
 	struct axl_pcie_aipu_dev *axldev = (struct axl_pcie_aipu_dev *)data;
 	struct pci_dev *pdev = axldev->pdev;
@@ -422,8 +457,10 @@ static int axlaipu_recovery(void *data)
 					"pci_enable_device failed (%d) ", ret);
 			else
 				axldev->dev_state = 0;
-			axlaipu_dma_imwr_restore(axldev);
+			axl_aipu_dma_imwr_restore(axldev);
 			axl_aipu_config_dev_dma(axldev);
+			axl_aipu_config_dev_msi(axldev);
+			axl_aipu_dev_dynmem_init(axldev);
 		}
 
 		link = (lnksta & PCI_EXP_LNKSTA_DLLLA) ? 1 : 0;
@@ -436,131 +473,17 @@ static int axlaipu_recovery(void *data)
 	return 0;
 }
 
-static void irq_poll_check(struct axl_pcie_aipu_dev *axldev, int msi)
-{
-	struct sysctrl_ctx *sys_ctx;
-	struct irq_wrk *irq_wrk = axldev->irq_wrk;
-
-	spin_lock(&axldev->msi_lock);
-	list_for_each_entry(sys_ctx, &irq_wrk[msi].sctx_list, node)
-	{
-		dev_dbg(&axldev->pdev->dev, "Wake up poll at %p for MSI%d\n",
-			sys_ctx, msi);
-		atomic_inc(&sys_ctx->poll_event_cnt);
-		wake_up_interruptible_poll(&sys_ctx->poll_wait_queue, EPOLLIN);
-	}
-	spin_unlock(&axldev->msi_lock);
-}
-
-static irqreturn_t metis_irq_fn(int irq, void *data)
-{
-	struct irq_wrk *irwq_elem = data;
-	struct axl_pcie_aipu_dev *axldev = irwq_elem->axldev;
-	struct pci_dev *pdev = axldev->pdev;
-	int id = irq - axldev->irq_vec;
-	dev_dbg(&pdev->dev, "%d interrupt (%d)\n", id, irq);
-	complete(&irwq_elem->irq_done);
-
-	irq_poll_check(axldev, id);
-	return IRQ_HANDLED;
-}
-
-static irqreturn_t metis_irq_handler(int irq, void *data)
-{
-	struct irq_wrk *irwq_elem = data;
-	struct axl_pcie_aipu_dev *axldev = irwq_elem->axldev;
-	struct pci_dev *pdev = axldev->pdev;
-
-	/* Quick operations only - just acknowledge and wake thread */
-	dev_dbg(&pdev->dev, "Hard IRQ %d triggered\n", irq);
-
-	/* Return IRQ_WAKE_THREAD to run the threaded handler */
-	return IRQ_WAKE_THREAD;
-}
-
-static irqreturn_t metis_irq_common_fn(int irq, void *data)
-{
-	struct irq_wrk *irwq_elem = data;
-	struct axl_pcie_aipu_dev *axldev = irwq_elem->axldev;
-	struct pci_dev *pdev = axldev->pdev;
-	int id = irq - axldev->irq_vec;
-	struct device_virt_msi_t *vmsi;
-
-	dev_dbg(&pdev->dev, "%d interrupt (%d)  hdrv %p\n", id, irq,
-		axldev->hdrv_base);
-
-	if (axldev->hdrv_base) {
-		vmsi = (struct device_virt_msi_t *)axldev->dma_va;
-		for (id = 0; id < MAX_MSI; id++) {
-			if (vmsi->msi[id] && VMSI_IRQ_EN) {
-				dev_dbg(&pdev->dev, "VMSI (%d)\n", id);
-				vmsi->msi[id] = 0;
-				complete(&axldev->irq_wrk[id].irq_done);
-				irq_poll_check(axldev, id);
-				continue;
-			}
-			if (NULL == axldev->irq_wrk[id].check)
-				continue;
-			if (axldev->irq_wrk[id].check(axldev, id)) {
-				complete(&axldev->irq_wrk[id].irq_done);
-				irq_poll_check(axldev, id);
-			}
-		}
-	} else {
-		for (id = 0; id < MAX_MSI; id++) {
-			if (id == MSI_MSG) {
-				complete(&axldev->irq_wrk[id].irq_done);
-				irq_poll_check(axldev, id);
-			}
-			if (id == MSI_DEV_AXE_MSG) {
-				complete(&axldev->irq_wrk[id].irq_done);
-				irq_poll_check(axldev, id);
-			}
-			if (NULL == axldev->irq_wrk[id].check)
-				continue;
-			if (axldev->irq_wrk[id].check(axldev, id)) {
-				complete(&axldev->irq_wrk[id].irq_done);
-				irq_poll_check(axldev, id);
-			}
-		}
-	}
-
-	return IRQ_HANDLED;
-}
-
-static int dma_irq_ck(struct axl_pcie_aipu_dev *axldev, int id)
-{
-	return axlaipu_dma_irq_ck(axldev, id);
-}
-static int krn_irq_ck(struct axl_pcie_aipu_dev *axldev, int id)
-{
-	struct device_sys_ctl_t *dsctl = axldev->vl2base;
-	struct device_ctx_t *devctx =
-		(struct device_ctx_t *)((uintptr_t)dsctl +
-					dsctl->ctx_mem_ref.offset);
-	struct pci_dev *pdev = axldev->pdev;
-	int sts = readl(&devctx[id].sts);
-
-	if (sts > 0)
-		return 0;
-
-	dev_dbg(&pdev->dev, "wake KRN %d (sts %s)\n", id,
-		sts == 0 ? "done" : "fail");
-
-	return 1;
-}
-
 static int axl_pci_msi_init(struct pci_dev *pdev,
 			    struct axl_pcie_aipu_dev *axldev)
 {
-	int err = 0, i, nmsi;
+	int err = 0, nmsi;
 
 	nmsi = pci_msi_vec_count(pdev);
 	dev_dbg(&pdev->dev, "MSI available %d\n", nmsi);
 
 	if (nmsi != 32) {
-		dev_err(&pdev->dev, "Wrong msi number %d\n", nmsi);
-		return -ENODEV;
+		dev_warn(&pdev->dev, "Wrong msi number %d\n", nmsi);
+		nmsi = 1;
 	}
 	if (single_msi)
 		nmsi = 1;
@@ -573,103 +496,37 @@ static int axl_pci_msi_init(struct pci_dev *pdev,
 		dev_info(&pdev->dev, "MSI registered %d (%d)\n", nmsi, err);
 	axldev->nmsi = err;
 
-	axldev->irq_wrk = devm_kcalloc(&pdev->dev, MAX_MSI,
+	axldev->irq_wrk = devm_kcalloc(&pdev->dev, MAX_VIRT_MSI,
 				       sizeof(*axldev->irq_wrk), GFP_KERNEL);
 	if (!axldev->irq_wrk)
+		return -ENOMEM;
+
+	axldev->vmsi_count = devm_kcalloc(&pdev->dev, MAX_VIRT_MSI,
+					  sizeof(*axldev->vmsi_count),
+					  GFP_KERNEL);
+	if (!axldev->vmsi_count)
 		return -ENOMEM;
 
 	axldev->irq_vec = pci_irq_vector(pdev, 0);
 	dev_info(&pdev->dev, "irq vec number %d\n", axldev->irq_vec);
 
-	if (axldev->nmsi == 1) {
-		char irq_name[NAME_SIZE];
-		char *msi_name;
+	/* Initialize and register IRQ handlers via MSI-specific init function */
+	err = axldev->msi_fops->init(axldev);
+	if (err)
+		return err;
 
-		dev_info(&pdev->dev, "Init irq handler for single msi\n");
-
-		for (i = MSI_KRN_0; i <= MSI_KRN_3; i++) {
-			if (!axldev->hdrv_base)
-				axldev->irq_wrk[i].check = krn_irq_ck;
-			else
-				axldev->irq_wrk[i].check = NULL;
-			axldev->irq_wrk[i].id = i;
-			axldev->irq_wrk[i].axldev = axldev;
-			axldev->irq_wrk[i].timeout =
-				get_timeout_ms(irq_timeout);
-			spin_lock_init(&axldev->irq_wrk[i].irq_lock);
-			init_completion(&axldev->irq_wrk[i].irq_done);
-			INIT_LIST_HEAD(&axldev->irq_wrk[i].sctx_list);
-		}
-		for (i = MSI_RD_CH0; i <= MSI_WR_CH3; i++) {
-			axldev->irq_wrk[i].check = dma_irq_ck;
-			axldev->irq_wrk[i].id = i;
-			axldev->irq_wrk[i].axldev = axldev;
-			axldev->irq_wrk[i].timeout =
-				get_timeout_ms(irq_timeout);
-			spin_lock_init(&axldev->irq_wrk[i].irq_lock);
-			init_completion(&axldev->irq_wrk[i].irq_done);
-			INIT_LIST_HEAD(&axldev->irq_wrk[i].sctx_list);
-		}
-		for (i = MSI_MSG; i < MAX_MSI; i++) {
-			axldev->irq_wrk[i].check = NULL;
-			axldev->irq_wrk[i].id = i;
-			axldev->irq_wrk[i].axldev = axldev;
-			axldev->irq_wrk[i].timeout =
-				get_timeout_ms(irq_timeout);
-			spin_lock_init(&axldev->irq_wrk[i].irq_lock);
-			init_completion(&axldev->irq_wrk[i].irq_done);
-			INIT_LIST_HEAD(&axldev->irq_wrk[i].sctx_list);
-		}
-
-		snprintf(irq_name, NAME_SIZE - 1, "msi-%s-%d", axldev->name, 0);
-		msi_name = devm_kstrdup(&pdev->dev, irq_name, GFP_KERNEL);
-		err = devm_request_threaded_irq(&pdev->dev, pdev->irq,
-						metis_irq_handler,
-						metis_irq_common_fn,
-						IRQF_SHARED | IRQF_ONESHOT,
-						msi_name, &axldev->irq_wrk[0]);
-		if (err)
-			return err;
-
-		get_cached_msi_msg(axldev->irq_vec, &axldev->irq_msi);
-		axlaipu_dma_init_imwr(axldev);
-	} else {
-		// better split for each resource dma rd/wr chs kernel/log/traces
-		for (i = 0; i < axldev->nmsi; i++) {
-			char irq_name[NAME_SIZE];
-			char *msi_name;
-			axldev->irq_wrk[i].axldev = axldev;
-			axldev->irq_wrk[i].id = i;
-			axldev->irq_wrk[i].timeout =
-				get_timeout_ms(irq_timeout);
-			spin_lock_init(&axldev->irq_wrk[i].irq_lock);
-			init_completion(&axldev->irq_wrk[i].irq_done);
-			INIT_LIST_HEAD(&axldev->irq_wrk[i].sctx_list);
-			snprintf(irq_name, NAME_SIZE - 1, "msi-%s-%d",
-				 axldev->name, i);
-			msi_name =
-				devm_kstrdup(&pdev->dev, irq_name, GFP_KERNEL);
-			err = devm_request_irq(&pdev->dev, pdev->irq + i,
-					       metis_irq_fn, IRQF_SHARED,
-					       msi_name, &axldev->irq_wrk[i]);
-			if (err)
-				return err;
-		}
-		get_cached_msi_msg(axldev->irq_vec, &axldev->irq_msi);
-		axlaipu_dma_init_imwr(axldev);
-	}
 	dev_dbg(&pdev->dev, "msi_info 0x%x 0x%x : 0x%x\n",
 		axldev->irq_msi.address_hi, axldev->irq_msi.address_lo,
 		axldev->irq_msi.data);
 
-	axlaipu_dma_enable_ctrl(axldev);
+	axl_aipu_dma_enable_ctrl(axldev);
 
 	return 0;
 }
-static void axlaipu_dma_imwr_restore(struct axl_pcie_aipu_dev *axldev)
+static void axl_aipu_dma_imwr_restore(struct axl_pcie_aipu_dev *axldev)
 {
 	get_cached_msi_msg(axldev->irq_vec, &axldev->irq_msi);
-	axlaipu_dma_init_imwr(axldev);
+	axl_aipu_dma_init_imwr(axldev);
 }
 
 static int axl_set_dma_mask(struct pci_dev *pdev)
@@ -687,27 +544,17 @@ static int axl_set_dma_mask(struct pci_dev *pdev)
 	return ret;
 }
 
-static int axlaipu_alloc_minor(struct axl_pcie_aipu_dev *axldev)
+static inline int axl_aipu_alloc_minor(void)
 {
-	struct pci_dev *pdev = axldev->pdev;
-	int i;
-
-	for (i = 0; i < AXLAIPU_MAX_MINORS; i++)
-		if (axlaipu_devices[i] == 0)
-			break;
-	if (i == AXLAIPU_MAX_MINORS) {
-		dev_err(&pdev->dev, "too many devices found!\n");
-		return -ENODEV;
-	}
-	axlaipu_devices[i] = 1;
-	return i;
+	return ida_alloc_max(&axl_aipu_minor_ida, AXL_AIPU_MAX_MINORS - 1,
+			     GFP_KERNEL);
 }
-static inline void axlaipu_free_minor(struct axl_pcie_aipu_dev *axldev)
+static inline void axl_aipu_free_minor(struct axl_pcie_aipu_dev *axldev)
 {
-	axlaipu_devices[axldev->minor] = 0;
+	ida_free(&axl_aipu_minor_ida, axldev->minor);
 }
 
-static void axlaipu_pci_deinit(struct pci_dev *pdev)
+static void axl_aipu_pci_deinit(struct pci_dev *pdev)
 {
 	axl_aipu_disable_dev_dma(pdev);
 	pci_clear_master(pdev);
@@ -743,6 +590,31 @@ static void mask_all_aer_errors(struct pci_dev *pdev)
 
 	dev_info(&pdev->dev, "All AER errors masked\n");
 }
+static int axl_aipu_check_pes_group(struct pci_dev *pdev)
+{
+	struct pci_dev *parent_port;
+	struct pci_dev *upstream_port;
+	u16 parent_vendor, parent_device;
+
+	if (!pdev->bus || !pdev->bus->self)
+		return -1;
+
+	parent_port = pdev->bus->self;
+
+	/* Check if parent port is a Microsemi device with ID 0x8562 */
+	pci_read_config_word(parent_port, PCI_VENDOR_ID, &parent_vendor);
+	pci_read_config_word(parent_port, PCI_DEVICE_ID, &parent_device);
+	if (parent_vendor != PCI_VENDOR_ID_MICROSEMI || parent_device != 0x8562)
+		return -1;
+
+	if (!parent_port->bus || !parent_port->bus->self)
+		return -1;
+
+	upstream_port = parent_port->bus->self;
+
+	return upstream_port->bus->number;
+}
+
 static void axl_aipu_get_memwindow_info(struct axl_pcie_aipu_dev *axldev,
 					struct pci_dev *pdev)
 {
@@ -793,11 +665,57 @@ static void axl_aipu_get_memwindow_info(struct axl_pcie_aipu_dev *axldev,
 
 #define BAR_0 0
 #define BAR_2 2
-static int axlaipu_pci_init(struct pci_dev *pdev,
-
-			    struct axl_pcie_aipu_dev *axldev)
+#define BAR_5 5
+static int axl_aipu_pci_resources_init(struct axl_pcie_aipu_dev *axldev)
 {
-	int err, mask;
+	int err, mask, dma_bar;
+	struct pci_dev *pdev = axldev->pdev;
+
+	if (axldev->dev_info->hw_gen >= AXL_HW_GEN_EUROPA) {
+		mask = BIT(BAR_0) | BIT(BAR_2) | BIT(BAR_5);
+		dma_bar = BAR_5;
+	} else if (axldev->dev_info->hw_gen == AXL_HW_GEN_METIS) {
+		mask = BIT(BAR_0) | BIT(BAR_2);
+		dma_bar = BAR_0;
+	} else {
+		dev_err(&pdev->dev, "Unknown device generation %d\n",
+			axldev->dev_info->hw_gen);
+		return -ENODEV;
+	}
+	if (europa_veloce) {
+		irq_timeout = 5 * irq_timeout;
+		dma_timeout = 5 * dma_timeout;
+	}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+	err = pcim_iomap_regions(pdev, mask, axldev->name);
+#else
+	err = pcim_iomap_regions_request_all(pdev, mask, axldev->name);
+#endif
+	if (err) {
+		dev_err(&pdev->dev, "Failed to request resources\n");
+		return -ENOMEM;
+	}
+	axldev->dma = pcim_iomap_table(pdev)[dma_bar];
+	axldev->pdma = pci_resource_start(pdev, dma_bar);
+	axldev->vl2base = pcim_iomap_table(pdev)[BAR_2];
+	axldev->pl2base = pci_resource_start(pdev, BAR_2);
+
+	if (!axldev->dma || !axldev->vl2base) {
+		dev_err(&pdev->dev, "Failed to map resources %p %p\n",
+			axldev->dma, axldev->vl2base);
+		return -EIO;
+	}
+
+	axldev->res_info->l2_base = axldev->pl2base;
+	axldev->res_info->l2_size = pci_resource_len(pdev, BAR_2);
+	return 0;
+}
+
+static int axl_aipu_pci_init(struct pci_dev *pdev,
+			     struct axl_pcie_aipu_dev *axldev)
+{
+	int err;
 	u16 reg16, lnkctl2, lnksta;
 	u32 reg32, lnkcap;
 
@@ -805,7 +723,7 @@ static int axlaipu_pci_init(struct pci_dev *pdev,
 	err = pcim_enable_device(pdev);
 	if (err) {
 		dev_err(&pdev->dev, "pci_enable_device failed: %d\n", err);
-		axlaipu_free_minor(axldev);
+		axl_aipu_free_minor(axldev);
 		return err;
 	}
 	pci_set_master(pdev);
@@ -815,31 +733,11 @@ static int axlaipu_pci_init(struct pci_dev *pdev,
 		goto pci_err_out;
 
 	pci_set_drvdata(pdev, axldev);
+	axldev->pdev = pdev;
 
-	mask = BIT(BAR_0) | BIT(BAR_2);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
-	err = pcim_iomap_regions(pdev, mask, axldev->name);
-#else
-	err = pcim_iomap_regions_request_all(pdev, mask, axldev->name);
-#endif
-	if (err) {
-		dev_err(&pdev->dev, "Failed to request resources\n");
-		err = -ENOMEM;
+	err = axl_aipu_pci_resources_init(axldev);
+	if (err)
 		goto pci_err_out;
-	}
-	axldev->dma = pcim_iomap_table(pdev)[BAR_0];
-	axldev->pdma = pci_resource_start(pdev, BAR_0);
-	axldev->vl2base = pcim_iomap_table(pdev)[BAR_2];
-	axldev->pl2base = pci_resource_start(pdev, BAR_2);
-
-	if (!axldev->dma || !axldev->vl2base) {
-		dev_err(&pdev->dev, "Failed to map resources %p %p\n",
-			axldev->dma, axldev->vl2base);
-		goto pci_err_out;
-	}
-
-	axldev->res_info->l2_base = axldev->pl2base;
-	axldev->res_info->l2_size = pci_resource_len(pdev, BAR_2);
 
 	disable_serr_bit(pdev);
 	mask_all_aer_errors(pdev);
@@ -847,10 +745,23 @@ static int axlaipu_pci_init(struct pci_dev *pdev,
 	axl_aipu_get_memwindow_info(axldev, pdev);
 
 	if (pdev->bus->self) {
+		axldev->pes_group = axl_aipu_check_pes_group(pdev);
+		if (axldev->pes_group != -1) {
+			dev_info(
+				&pdev->dev,
+				"Microsemi switch upstream port bus ID: %02x\n",
+				axldev->pes_group);
+		}
+
 		pcie_capability_read_dword(pdev->bus->self, PCI_EXP_LNKCAP,
 					   &reg32);
 		if ((reg32 & PCI_EXP_LNKCAP_DLLLARC))
 			axldev->dlllarc = 1;
+		if (europa_veloce) {
+			dev_info(&pdev->dev,
+				 " Disable link recovery in Veloce\n");
+			axldev->dlllarc = 0;
+		}
 		lnkcap = (reg32 & PCI_EXP_LNKCAP_SLS);
 		pcie_capability_read_word(pdev->bus->self, PCI_EXP_LNKSTA,
 					  &lnksta);
@@ -901,8 +812,6 @@ static int axlaipu_pci_init(struct pci_dev *pdev,
 	if (!axldev->pcie_state)
 		dev_err(&pdev->dev, "Fail to save pcie state\n");
 
-	axldev->pdev = pdev;
-
 	return 0;
 
 pci_err_out:
@@ -910,13 +819,19 @@ pci_err_out:
 	return err;
 }
 
-static int axlaipu_dma_init(struct axl_pcie_aipu_dev *axldev)
+static int axl_aipu_dma_init(struct axl_pcie_aipu_dev *axldev)
 {
 	struct pci_dev *pdev = axldev->pdev;
 	int i;
 	struct workqueue_struct *wq;
-	int max_dma_ch = axldev->dev_info->dma_rd_ch;
+	int max_dma_ch;
 
+	if (enable_sg_host_dma) {
+		axldev->dev_info->dma_rd_ch -= 1;
+		axldev->dev_info->dma_wr_ch -= 1;
+	}
+
+	max_dma_ch = axldev->dev_info->dma_rd_ch;
 	axldev->dma_wrqc = devm_kcalloc(&pdev->dev, max_dma_ch,
 					sizeof(*axldev->dma_wrqc), GFP_KERNEL);
 	if (!axldev->dma_wrqc)
@@ -971,7 +886,7 @@ free_rdwq:
 	return -ENOMEM;
 }
 
-static void axlaipu_dma_deinit(struct axl_pcie_aipu_dev *axldev)
+static void axl_aipu_dma_deinit(struct axl_pcie_aipu_dev *axldev)
 {
 	int i, max_dma_ch = axldev->dev_info->dma_rd_ch;
 	dev_dbg(&axldev->pdev->dev, "Destroy workqueue\n");
@@ -1007,23 +922,34 @@ axl_aipu_allocate_device(struct pci_dev *pdev, const struct pci_device_id *id)
 		dev_err(&pdev->dev, "cannot alloc memory window info\n");
 		return ERR_PTR(-ENOMEM);
 	}
-	axldev->minor = axlaipu_alloc_minor(axldev);
+	axldev->minor = axl_aipu_alloc_minor();
 	if (axldev->minor < 0) {
 		dev_err(&pdev->dev, "cannot allocate minor\n");
 		return ERR_PTR(-ENODEV);
 	}
 	axldev->pdev = pdev;
-	axldev->dev_info = (const struct axe_device_info *)id->driver_data;
+	axldev->dev_info = (struct axe_device_info *)id->driver_data;
 	snprintf(axldev->name, NAME_SIZE - 1, "%s-%x:%x:%x",
 		 axldev->dev_info->devname, pci_domain_nr(bus),
 		 pdev->bus->number, PCI_SLOT(pdev->devfn));
 
-	if (axldev->dev_info->dma_type == EDMA_DMA)
-		edma_register_dev_fops(axldev);
-	else
-		hdma_register_dev_fops(axldev);
-
 	return axldev;
+}
+
+static void axl_aipu_register_dev_fops(struct axl_pcie_aipu_dev *axldev)
+{
+	if (axldev->dev_info->dma_type == EDMA_DMA)
+		axl_aipu_edma_register_dev_fops(axldev);
+	else
+		axl_aipu_hdma_register_dev_fops(axldev);
+}
+
+static void axl_aipu_register_msi_dev_fops(struct axl_pcie_aipu_dev *axldev)
+{
+	if (axldev->dev_info->hw_gen >= AXL_HW_GEN_EUROPA)
+		axl_aipu_register_msi_fops(axldev);
+	else
+		axl_aipu_register_msi_metis_fops(axldev);
 }
 
 static struct device_host_drv_t *
@@ -1031,8 +957,8 @@ axl_aipu_get_hdrv_area(struct axl_pcie_aipu_dev *axldev)
 {
 	struct device_sys_ctl_t *dsctl = axldev->vl2base;
 	if (dsctl->hdrv_mem_ref.magic != SYSCTL_HOST_DRV_AREA_MAGIC) {
-		dev_warn(&axldev->pdev->dev, "Invalid hdrv magic %x\n",
-			 dsctl->hdrv_mem_ref.magic);
+		dev_dbg(&axldev->pdev->dev, "Invalid hdrv magic %x\n",
+			dsctl->hdrv_mem_ref.magic);
 		return NULL;
 	}
 	return (struct device_host_drv_t *)((uintptr_t)dsctl +
@@ -1048,16 +974,25 @@ static void axl_aipu_disable_dev_dma(struct pci_dev *pdev)
 	axldev->hdrv_base->ctrl = 0;
 }
 
-static void axl_aipu_config_dev_dma(struct axl_pcie_aipu_dev *axldev)
+static void axl_aipu_deinit_dev_dma(struct axl_pcie_aipu_dev *axldev)
+{
+	struct device_host_drv_t *hdrv;
+
+	hdrv = axl_aipu_get_hdrv_area(axldev);
+	if (!hdrv) {
+		return;
+	}
+	hdrv->ctrl = 0;
+}
+
+void axl_aipu_config_dev_dma(struct axl_pcie_aipu_dev *axldev)
 {
 	struct device_host_drv_t *hdrv;
 	struct pci_dev *pdev = axldev->pdev;
 
-	if (axldev->dev_info->mode == AXL_QEMU_MODE)
-		return;
 	hdrv = axl_aipu_get_hdrv_area(axldev);
 	if (!hdrv) {
-		dev_warn(&pdev->dev, "Fail to get hdrv area\n");
+		dev_info(&pdev->dev, "vmsi not available\n");
 		return;
 	}
 	hdrv->target = (u64)axldev->dma_addr;
@@ -1065,24 +1000,72 @@ static void axl_aipu_config_dev_dma(struct axl_pcie_aipu_dev *axldev)
 	hdrv->size = axldev->dma_size;
 	hdrv->ctrl = 1;
 	axldev->hdrv_base = hdrv;
+	dev_info(&pdev->dev, "vmsi configured\n");
+}
+
+void axl_aipu_config_dev_msi(struct axl_pcie_aipu_dev *axldev)
+{
+	struct device_vmsi_config_t *msi_cfg;
+
+	msi_cfg = axl_aipu_get_msi_config_area(axldev);
+	axldev->msi_cfg = msi_cfg;
+
+	if (axldev->msi_cfg) {
+		axldev->max_msi = axldev->msi_cfg->num_vmsi;
+	} else if (axldev->dev_info->hw_gen >= AXL_HW_GEN_EUROPA) {
+		axldev->max_msi = MAX_VIRT_MSI;
+	} else {
+		axldev->max_msi = PMSI_MAX;
+	}
+
+	axl_aipu_register_msi_dev_fops(axldev);
 }
 
 static void axl_aipu_drv_dma_alloc(struct axl_pcie_aipu_dev *axldev)
 {
 	struct pci_dev *pdev = axldev->pdev;
 	dma_addr_t dma_addr = 0;
+	dma_addr_t aligned_dma_addr;
+	void *aligned_va;
+	size_t offset;
 
 	axldev->dma_size = axldev->dev_info->dma_size;
-	axldev->dma_va = dma_alloc_wc(&pdev->dev, axldev->dma_size, &dma_addr,
-				      GFP_KERNEL | __GFP_NOWARN);
-	if (axldev->dma_va == NULL) {
-		dev_err(&pdev->dev, "Fail to dma alloc %x\n", axldev->dma_size);
+	axldev->dma_alloc_size = axldev->dma_size * 2;
+	axldev->dma_va_unaligned =
+		dma_alloc_wc(&pdev->dev, axldev->dma_alloc_size, &dma_addr,
+			     GFP_KERNEL | __GFP_NOWARN);
+	if (axldev->dma_va_unaligned == NULL) {
+		dev_err(&pdev->dev, "Fail to dma alloc %x\n",
+			axldev->dma_alloc_size);
 		return;
 	}
+	axldev->dma_addr_unaligned = dma_addr;
+	aligned_dma_addr = ALIGN(dma_addr, axldev->dma_size);
+	offset = aligned_dma_addr - dma_addr;
+	aligned_va = axldev->dma_va_unaligned + offset / sizeof(unsigned long);
+
 	axldev->dma_enabled = 1;
-	axldev->dma_addr = dma_addr;
-	dev_dbg(&pdev->dev, "dma alloc 0x%llx (0x%x)\n", dma_addr,
-		axldev->dma_size);
+	axldev->dma_addr = aligned_dma_addr;
+	axldev->dma_va = aligned_va;
+
+	/* Initialize host-side descriptor buffer after VMSI (4KB) */
+	axldev->desc_host_va =
+		(struct dw_edma_ll_buf *)((u8 *)aligned_va +
+					  sizeof(struct device_virt_msi_t));
+	axldev->desc_host_pa =
+		aligned_dma_addr + sizeof(struct device_virt_msi_t);
+	axldev->desc_host_size = DMA_DESC_BUF_SIZE;
+
+	/* Clear descriptor buffer to ensure no stale data */
+	memset(axldev->desc_host_va, 0, axldev->desc_host_size);
+
+	dev_dbg(&pdev->dev,
+		"dma alloc unaligned: 0x%llx, aligned: 0x%llx (0x%x), offset: 0x%lx\n",
+		dma_addr, aligned_dma_addr, axldev->dma_size, offset);
+	dev_dbg(&pdev->dev, "descriptor buffer: va=%p, pa=0x%llx, size=0x%lx\n",
+		axldev->desc_host_va, axldev->desc_host_pa,
+		axldev->desc_host_size);
+
 	axl_aipu_config_dev_dma(axldev);
 }
 
@@ -1091,8 +1074,16 @@ static void axl_aipu_drv_dma_free(struct axl_pcie_aipu_dev *axldev)
 	struct pci_dev *pdev = axldev->pdev;
 	if (axldev->dma_enabled) {
 		dev_info(&pdev->dev, "Release dma mem %s\n", axldev->name);
-		dma_free_wc(&pdev->dev, axldev->dma_size, axldev->dma_va,
-			    axldev->dma_addr);
+		/* Clear host descriptor buffer pointers */
+		axldev->desc_host_va = NULL;
+		axldev->desc_host_pa = 0;
+		dma_free_wc(&pdev->dev, axldev->dma_alloc_size,
+			    axldev->dma_va_unaligned,
+			    axldev->dma_addr_unaligned);
+		axldev->dma_va = NULL;
+		axldev->dma_va_unaligned = NULL;
+		axldev->dma_enabled = 0;
+		axl_aipu_deinit_dev_dma(axldev);
 	}
 }
 
@@ -1101,18 +1092,18 @@ static int axl_aipu_create_device(struct axl_pcie_aipu_dev *axldev)
 	struct pci_dev *pdev = axldev->pdev;
 	int err;
 
-	dev_dbg(&pdev->dev, "Add class dev %d:%d\n", axlaipu_major,
+	dev_dbg(&pdev->dev, "Add class dev %d:%d\n", axl_aipu_major,
 		axldev->minor);
-	cdev_init(&axldev->cdev, &axlaipu_file_fops);
-	err = cdev_add(&axldev->cdev, MKDEV(axlaipu_major, axldev->minor), 1);
+	cdev_init(&axldev->cdev, &axl_aipu_file_fops);
+	err = cdev_add(&axldev->cdev, MKDEV(axl_aipu_major, axldev->minor), 1);
 	if (err) {
 		dev_err(&pdev->dev, "chardev registration failed\n");
 		return err;
 	}
 
 	dev_dbg(&pdev->dev, "device create\n");
-	if (IS_ERR(device_create(axlaipu_class, &pdev->dev,
-				 MKDEV(axlaipu_major, axldev->minor), axldev,
+	if (IS_ERR(device_create(axl_aipu_class, &pdev->dev,
+				 MKDEV(axl_aipu_major, axldev->minor), axldev,
 				 "%s", axldev->name))) {
 		dev_err(&pdev->dev, "can't create device\n");
 		err = -ENOMEM;
@@ -1120,24 +1111,104 @@ static int axl_aipu_create_device(struct axl_pcie_aipu_dev *axldev)
 	}
 	return 0;
 }
+#ifndef PCI_SUBDEVICE_ID_QEMU
+#define PCI_SUBDEVICE_ID_QEMU 0x1100
+#endif
+#ifndef PCI_VENDOR_ID_REDHAT
+#define PCI_VENDOR_ID_REDHAT 0x1b36
+#endif
 
 static int axl_aipu_drv_recovery_init(struct axl_pcie_aipu_dev *axldev)
 {
 	struct pci_dev *pdev = axldev->pdev;
+	struct pci_dev *parent_port;
+	u16 parent_vendor, parent_subsys_device;
 	int err;
 
-	if (axldev->dlllarc) {
-		dev_info(&pdev->dev,
-			 "Data Link Layer Link Active Reporting capability\n");
-		axldev->recovery = kthread_run(axlaipu_recovery, axldev, "%s",
-					       axldev->name);
-		if (IS_ERR(axldev->recovery)) {
-			err = PTR_ERR(axldev->recovery);
-			pr_err("Failed to create kernel thread\n");
-			return err;
-		}
-	} else
+	if (!axldev->dlllarc) {
 		axldev->recovery = NULL;
+		return 0;
+	}
+
+	/* Check if parent port exists and is not a QEMU device */
+	if (pdev->bus && pdev->bus->self) {
+		parent_port = pdev->bus->self;
+		pci_read_config_word(parent_port, PCI_VENDOR_ID,
+				     &parent_vendor);
+		pci_read_config_word(parent_port, PCI_SUBSYSTEM_ID,
+				     &parent_subsys_device);
+
+		/* Skip recovery thread for QEMU (vendor ID 0x1b36 or subsystem device ID 0x1100) */
+		if (parent_vendor == PCI_VENDOR_ID_REDHAT ||
+		    parent_subsys_device == PCI_SUBDEVICE_ID_QEMU) {
+			dev_info(
+				&pdev->dev,
+				"QEMU parent port detected, skipping recovery thread\n");
+			axldev->recovery = NULL;
+			return 0;
+		}
+	}
+
+	dev_info(&pdev->dev,
+		 "Data Link Layer Link Active Reporting capability\n");
+	axldev->recovery =
+		kthread_run(axl_aipu_recovery, axldev, "%s", axldev->name);
+	if (IS_ERR(axldev->recovery)) {
+		err = PTR_ERR(axldev->recovery);
+		dev_err(&pdev->dev, "Failed to create kernel thread\n");
+		return err;
+	}
+	return 0;
+}
+
+/**
+ * axl_aipu_trace_alloc - Allocate DMA trace buffer
+ * @axldev: Device context
+ * @num_entries: Requested number of entries
+ *
+ * Allocates trace buffer and rounds size to next power of 2.
+ * Minimum 64 entries, maximum 65536 entries.
+ *
+ * Returns: 0 on success, -ENOMEM on failure
+ */
+static int axl_aipu_trace_alloc(struct axl_pcie_aipu_dev *axldev,
+				unsigned int num_entries)
+{
+	struct dma_trace_buffer *tb;
+	unsigned int alloc_size;
+
+	/* Clamp entries between 64 and 65536 */
+	num_entries = clamp_t(unsigned int, num_entries, 64, 65536);
+
+	/* Round up to next power of 2 for efficient masking */
+	num_entries = roundup_pow_of_two(num_entries);
+
+	/* Allocate management structure */
+	tb = devm_kzalloc(&axldev->pdev->dev, sizeof(*tb), GFP_KERNEL);
+	if (!tb)
+		return -ENOMEM;
+
+	/* Allocate trace entries array */
+	alloc_size = num_entries * sizeof(struct dma_trace_entry);
+	tb->entries = devm_kzalloc(&axldev->pdev->dev, alloc_size, GFP_KERNEL);
+	if (!tb->entries)
+		return -ENOMEM;
+
+	/* Initialize circular buffer */
+	tb->size = num_entries;
+	tb->size_mask = num_entries - 1;
+	tb->head = 0;
+	tb->tail = 0;
+	spin_lock_init(&tb->lock);
+	atomic_set(&tb->enabled, 0);
+	atomic64_set(&tb->overruns, 0);
+	atomic64_set(&tb->total_traces, 0);
+
+	axldev->trace_buf = tb;
+
+	dev_info(&axldev->pdev->dev, "DMA trace buffer: %u entries (%u KB)\n",
+		 num_entries, alloc_size / 1024);
+
 	return 0;
 }
 
@@ -1150,16 +1221,28 @@ static int axl_aipu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (IS_ERR(axldev))
 		return PTR_ERR(axldev);
 
-	err = axlaipu_pci_init(pdev, axldev);
+	err = axl_aipu_pci_init(pdev, axldev);
 	if (err)
 		goto err_out;
 
+	axl_aipu_register_dev_fops(axldev);
+	axl_aipu_config_dev_msi(axldev);
+	axl_aipu_dev_dynmem_init(axldev);
+
 	mutex_init(&axldev->mutex);
 	mutex_init(&axldev->msg_mutex);
+	mutex_init(&axldev->desc_mutex);
 
 	spin_lock_init(&axldev->msi_lock);
 
 	axl_aipu_drv_dma_alloc(axldev);
+
+	/* Allocate DMA trace buffer */
+	err = axl_aipu_trace_alloc(axldev, dma_trace_entries);
+	if (err)
+		dev_warn(
+			&pdev->dev,
+			"Failed to allocate DMA trace buffer, tracing disabled\n");
 
 	err = axl_aipu_create_device(axldev);
 	if (err)
@@ -1169,7 +1252,7 @@ static int axl_aipu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (err)
 		goto err_dev_out;
 
-	err = axlaipu_dma_init(axldev);
+	err = axl_aipu_dma_init(axldev);
 	if (err)
 		goto err_dev_out;
 
@@ -1177,19 +1260,19 @@ static int axl_aipu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (err)
 		goto err_dev_out;
 
-	axlaipu_dev_debugfs_init(axldev);
+	axl_aipu_dev_debugfs_init(axldev);
 
 	return 0;
 
 err_dev_out:
-	axlaipu_dma_deinit(axldev);
-	device_destroy(axlaipu_class, MKDEV(axlaipu_major, axldev->minor));
+	axl_aipu_dma_deinit(axldev);
+	device_destroy(axl_aipu_class, MKDEV(axl_aipu_major, axldev->minor));
 	cdev_del(&axldev->cdev);
 
 err_out:
 	axl_aipu_drv_dma_free(axldev);
-	axlaipu_free_minor(axldev);
-	axlaipu_pci_deinit(pdev);
+	axl_aipu_free_minor(axldev);
+	axl_aipu_pci_deinit(pdev);
 	return err;
 }
 
@@ -1198,22 +1281,22 @@ static void axl_aipu_remove(struct pci_dev *pdev)
 	struct axl_pcie_aipu_dev *axldev = pci_get_drvdata(pdev);
 	unsigned int minor = MINOR(axldev->cdev.dev);
 
-	axlaipu_dev_debugfs_exit(axldev);
-	device_destroy(axlaipu_class, MKDEV(axlaipu_major, axldev->minor));
+	axl_aipu_dev_debugfs_exit(axldev);
+	device_destroy(axl_aipu_class, MKDEV(axl_aipu_major, axldev->minor));
 	cdev_del(&axldev->cdev);
-	axlaipu_free_minor(axldev);
+	axl_aipu_free_minor(axldev);
 
 	dev_info(&pdev->dev, "Unregistered %s (%d %d)\n", axldev->name, minor,
 		 axldev->minor);
 
 	axl_aipu_drv_dma_free(axldev);
-	axlaipu_dma_deinit(axldev);
+	axl_aipu_dma_deinit(axldev);
 	if (axldev->recovery)
 		kthread_stop(axldev->recovery);
 	if (axldev->pcie_state)
 		kfree(axldev->pcie_state);
 
-	axlaipu_pci_deinit(pdev);
+	axl_aipu_pci_deinit(pdev);
 }
 
 static pci_ers_result_t axl_mmio_enabled(struct pci_dev *pdev)
@@ -1349,9 +1432,10 @@ static const struct pci_error_handlers axl_err_handler = {
 	.resume = axl_io_resume,
 };
 
-static struct axe_device_info axe_axlaipu_qemu_metis = {
+static struct axe_device_info axl_aipu_qemu_device_info = {
 	.name = "metis qemu",
 	.devname = "metis",
+	.hw_gen = AXL_HW_GEN_METIS,
 	.mode = AXL_QEMU_MODE,
 	.dma_rd_ch = EDMA_V0_MAX_NR_CH,
 	.dma_wr_ch = EDMA_V0_MAX_NR_CH,
@@ -1359,9 +1443,10 @@ static struct axe_device_info axe_axlaipu_qemu_metis = {
 	.dma_size = DMA_SIZE,
 	.aicore_count = 4,
 };
-static struct axe_device_info axl_aipu_metis = {
+static struct axe_device_info axl_aipu_silicon_device_info = {
 	.name = "metis silicon",
 	.devname = "metis",
+	.hw_gen = AXL_HW_GEN_METIS,
 	.mode = AXL_SILICON_MODE,
 	.dma_rd_ch = EDMA_V0_MAX_NR_CH,
 	.dma_wr_ch = EDMA_V0_MAX_NR_CH,
@@ -1373,24 +1458,26 @@ static struct axe_device_info axl_aipu_metis = {
 static const struct axe_device_info axl_aipu_europa = {
 	.name = "europa silicon",
 	.devname = "europa",
+	.hw_gen = AXL_HW_GEN_EUROPA,
 	.mode = AXL_SILICON_MODE,
 	.dma_rd_ch = HDMA_V0_MAX_NR_CH,
 	.dma_wr_ch = HDMA_V0_MAX_NR_CH,
 	.dma_type = HYPER_DMA,
 	.dma_size = DMA_SIZE,
-	.aicore_count = 4,
-	.pve_count = 16,
+	.aicore_count = 8,
+	.pve_core_count = 16,
 };
 static const struct axe_device_info axl_aipu_qemu_europa = {
 	.name = "europa qemu",
 	.devname = "europa",
+	.hw_gen = AXL_HW_GEN_EUROPA,
 	.mode = AXL_QEMU_MODE,
 	.dma_rd_ch = HDMA_V0_MAX_NR_CH,
 	.dma_wr_ch = HDMA_V0_MAX_NR_CH,
 	.dma_type = HYPER_DMA,
 	.dma_size = DMA_SIZE,
-	.aicore_count = 4,
-	.pve_count = 16,
+	.aicore_count = 8,
+	.pve_core_count = 16,
 };
 /*
  * Macro is used to create the struct pci_device_id that matches
@@ -1407,12 +1494,15 @@ static const struct axe_device_info axl_aipu_qemu_europa = {
 	.subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID, \
 	.driver_data = (kernel_ulong_t)&data
 static const struct pci_device_id axl_pci_tbl[] = {
-	{ AXE_PCI_SIM_DEVICE_IDS(AXL_DEV_SYNOPSYS, axe_axlaipu_qemu_metis) },
-	{ AXE_PCI_SIM_DEVICE_IDS(AXL_DEV_QEMU_OMEGA, axe_axlaipu_qemu_metis) },
+	{ AXE_PCI_SIM_DEVICE_IDS(AXL_DEV_SYNOPSYS, axl_aipu_qemu_device_info) },
+	{ AXE_PCI_SIM_DEVICE_IDS(AXL_DEV_QEMU_OMEGA,
+				 axl_aipu_qemu_device_info) },
 	{ AXE_PCI_SIM_DEVICE_IDS(AXL_DEV_QEMU_EUROPA, axl_aipu_qemu_europa) },
-	{ AXE_PCI_DEVICE_IDS(AXLAIPU_ALPHA_DEVICE_ID, axl_aipu_metis) },
-	{ AXE_PCI_DEVICE_IDS(AXLAIPU_OMEGA_DEVICE_ID, axl_aipu_metis) },
-	{ AXE_PCI_DEVICE_IDS(AXLAIPU_EUROPA_DEVICE_ID, axl_aipu_europa) },
+	{ AXE_PCI_DEVICE_IDS(AXL_AIPU_ALPHA_DEVICE_ID,
+			     axl_aipu_silicon_device_info) },
+	{ AXE_PCI_DEVICE_IDS(AXL_AIPU_OMEGA_DEVICE_ID,
+			     axl_aipu_silicon_device_info) },
+	{ AXE_PCI_DEVICE_IDS(AXL_AIPU_EUROPA_DEVICE_ID, axl_aipu_europa) },
 	{ 0 }
 };
 MODULE_DEVICE_TABLE(pci, axl_pci_tbl);
@@ -1424,21 +1514,21 @@ static struct pci_driver axl_aipu_pci_driver = {
 	.remove = axl_aipu_remove,
 	.shutdown = axl_aipu_shutdown,
 	.err_handler = &axl_err_handler,
-#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 14, 0)
-	.dev_groups = axlaipu_pcie_axl_groups,
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 14, 0) || defined(RHEL_RELEASE_CODE)
+	.dev_groups = axl_aipu_pcie_axl_groups,
 #endif
 };
 
 static CLASS_ATTR_STRING(version, 0444, DRIVER_VERSION);
 
-#define AXLAIPU_BUF_LEN 32
-static ssize_t axlaipu_drv_debugfs_version_show(struct file *filp,
-						char __user *ubuf, size_t count,
-						loff_t *offp)
+#define AXL_AIPU_BUF_LEN 32
+static ssize_t axl_aipu_drv_debugfs_version_show(struct file *filp,
+						 char __user *ubuf,
+						 size_t count, loff_t *offp)
 {
 	ssize_t pos;
 	size_t buf_size;
-	char buf[AXLAIPU_BUF_LEN];
+	char buf[AXL_AIPU_BUF_LEN];
 
 	buf_size = min(count, sizeof(buf));
 	pos = scnprintf(buf, buf_size, "%s\n", DRIVER_VERSION);
@@ -1446,125 +1536,200 @@ static ssize_t axlaipu_drv_debugfs_version_show(struct file *filp,
 	return simple_read_from_buffer(ubuf, count, offp, buf, pos);
 }
 
-static const struct file_operations axlaipu_drv_debugfs_version_fops = {
+static const struct file_operations axl_aipu_drv_debugfs_version_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
-	.read = axlaipu_drv_debugfs_version_show
+	.read = axl_aipu_drv_debugfs_version_show
 };
 
-static void axlaipu_drv_debugfs_init(void)
+static ssize_t axl_aipu_drv_debugfs_vmsi_show(struct file *filp,
+					      char __user *ubuf, size_t count,
+					      loff_t *ppos)
 {
-	axlaipu_debugfs_root = debugfs_create_dir(DEVICE_CLASS_NAME, NULL);
-	if (!axlaipu_debugfs_root) {
-		pr_err("axlaipu: can't create debugfs root directoryaxlaipu\n");
+	struct axl_pcie_aipu_dev *axldev = filp->private_data;
+	char *strbuf;
+	int i;
+	size_t size, ret, off = 0;
+
+	/* Lets limit the buffer size the way the Intel/AMD drivers do */
+	size = min_t(size_t, count, 0x1000U);
+
+	/* Allocate the memory for the buffer */
+	strbuf = kmalloc(size, GFP_KERNEL);
+	if (strbuf == NULL)
+		return -ENOMEM;
+
+	if (!is_vmsi_enabled(axldev)) {
+		off += scnprintf(strbuf + off, size - off,
+				 "VMSI is disabled\n");
+		goto vmsi_dbgfs_out;
+	}
+	/* Put the data into the string buffer */
+	for (i = 0; i < axldev->max_msi; i++) {
+		off += scnprintf(strbuf + off, size - off, "VMSI%d: %d\n", i,
+				 get_vmsi_count(axldev, i));
+	}
+vmsi_dbgfs_out:
+	ret = simple_read_from_buffer(ubuf, count, ppos, strbuf, off);
+	kfree(strbuf);
+
+	return ret;
+}
+static ssize_t axl_aipu_drv_debugfs_vmsi_write(struct file *file,
+					       const char __user *ubuf,
+					       size_t size, loff_t *offp)
+{
+	struct axl_pcie_aipu_dev *axldev = file->private_data;
+	int i;
+
+	if (!is_vmsi_enabled(axldev)) {
+		dev_warn(&axldev->pdev->dev, "VMSI is disabled\n");
+		return -EINVAL;
+	}
+	for (i = 0; i < axldev->max_msi; i++) {
+		clear_vmsi_count(axldev, i);
+	}
+
+	return size;
+}
+static const struct file_operations axl_aipu_drv_debugfs_vmsi_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.read = axl_aipu_drv_debugfs_vmsi_show,
+	.write = axl_aipu_drv_debugfs_vmsi_write
+};
+
+static void axl_aipu_drv_debugfs_init(void)
+{
+	axl_aipu_debugfs_root = debugfs_create_dir(DEVICE_CLASS_NAME, NULL);
+	if (!axl_aipu_debugfs_root) {
+		pr_err("axl_aipu: can't create debugfs root directory for axl_aipu\n");
 		return;
 	}
 
-	pr_info("axlaipu: root directory for axlaipu\n");
-	debugfs_create_file("version", 0444, axlaipu_debugfs_root, NULL,
-			    &axlaipu_drv_debugfs_version_fops);
+	pr_info("axl_aipu: root directory for axl_aipu\n");
+	debugfs_create_file("version", 0444, axl_aipu_debugfs_root, NULL,
+			    &axl_aipu_drv_debugfs_version_fops);
 }
-static void axlaipu_drv_debugfs_exit(void)
+static void axl_aipu_drv_debugfs_exit(void)
 {
-	debugfs_remove_recursive(axlaipu_debugfs_root);
-	axlaipu_debugfs_root = NULL;
-	pr_info("axlaipu: debugfs root directory axlaipu removed ");
+	debugfs_remove_recursive(axl_aipu_debugfs_root);
+	axl_aipu_debugfs_root = NULL;
+	pr_info("axl_aipu: debugfs root directory axl_aipu removed\n");
 	return;
 }
 
-static int __init axlaipu_init(void)
+static void axl_aipu_dev_debugfs_init(struct axl_pcie_aipu_dev *axldev)
+{
+	char name[NAME_SIZE];
+
+	if (!axl_aipu_debugfs_root)
+		return;
+
+	snprintf(name, NAME_SIZE, "%s-%s", axldev->dev_info->devname,
+		 dev_name(&axldev->pdev->dev));
+	axldev->dentry = debugfs_create_dir(name, axl_aipu_debugfs_root);
+	if (IS_ERR(axldev->dentry)) {
+		dev_err(&axldev->pdev->dev,
+			"Failed to create debugfs directory %s\n", name);
+		return;
+	}
+
+	debugfs_create_file("vmsi", 0644, axldev->dentry, axldev,
+			    &axl_aipu_drv_debugfs_vmsi_fops);
+
+	if (axldev->fops->dev_debugfs_init)
+		axldev->fops->dev_debugfs_init(axldev);
+}
+
+static int __init axl_aipu_init(void)
 {
 	int retval;
 	dev_t dev;
 
-	/*The bridge on some systems was observed to be incorrectly configured
-	* if bridge is in this state, it will need to be rescanned to have
-	  it configured properly*/
-	retval = apply_resets_if_needed();
-	if (retval) {
-		pr_info("axl: Bridge not reset becuse of a previously reported error: %u\n",
-			retval);
-		pr_info("axl: This is not fatal and is normal for passtrough devices\n");
-		pr_info("axl: The module will continue to load without attempting bridge reset\n");
-	}
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
-	axlaipu_class = class_create(THIS_MODULE, DEVICE_CLASS_NAME);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
-	axlaipu_class->dev_groups = axlaipu_pcie_axl_groups;
-#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0) || defined(RHEL_RELEASE_CODE)
+	axl_aipu_class = class_create(DEVICE_CLASS_NAME);
 #else
-	axlaipu_class = class_create(DEVICE_CLASS_NAME);
+	axl_aipu_class = class_create(THIS_MODULE, DEVICE_CLASS_NAME);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
+	axl_aipu_class->dev_groups = axl_aipu_pcie_axl_groups;
 #endif
-	if (IS_ERR(axlaipu_class)) {
-		retval = PTR_ERR(axlaipu_class);
-		pr_err("axlaipu: can't register %s class\n", DEVICE_CLASS_NAME);
+#endif
+	if (IS_ERR(axl_aipu_class)) {
+		retval = PTR_ERR(axl_aipu_class);
+		pr_err("axl_aipu: can't register %s class\n",
+		       DEVICE_CLASS_NAME);
 		goto err;
 	}
 
-	retval = class_create_file(axlaipu_class, &class_attr_version.attr);
+	retval = class_create_file(axl_aipu_class, &class_attr_version.attr);
 	if (retval) {
 		pr_err("%s: can't create sysfs version file\n",
 		       DEVICE_CLASS_NAME);
 		goto err_class;
 	}
 
-	retval = alloc_chrdev_region(&dev, 0, AXLAIPU_MAX_MINORS,
+	retval = alloc_chrdev_region(&dev, 0, AXL_AIPU_MAX_MINORS,
 				     DEVICE_CLASS_NAME);
 	if (retval) {
-		pr_err("axlaipu: can't register character device\n");
+		pr_err("axl_aipu: can't register character device\n");
 		goto err_attr;
 	}
-	axlaipu_major = MAJOR(dev);
+	axl_aipu_major = MAJOR(dev);
 
 	if (debugfs_initialized())
-		axlaipu_drv_debugfs_init();
+		axl_aipu_drv_debugfs_init();
 
 	retval = pci_register_driver(&axl_aipu_pci_driver);
 	if (retval) {
-		pr_err("axlaipu: can't register pci driver\n");
+		pr_err("axl_aipu: can't register pci driver\n");
 		goto err_unchr;
 	}
 
-	pr_info("Triton Linux Driver, version " DRIVER_VERSION ", init OK\n");
+	pr_info("Axelera AIPU PCIe Driver, version " DRIVER_VERSION
+		", init OK\n");
 
 	return 0;
 
 err_unchr:
-	axlaipu_drv_debugfs_exit();
-	unregister_chrdev_region(dev, AXLAIPU_MAX_MINORS);
+	axl_aipu_drv_debugfs_exit();
+	unregister_chrdev_region(dev, AXL_AIPU_MAX_MINORS);
 err_attr:
-	class_remove_file(axlaipu_class, &class_attr_version.attr);
+	class_remove_file(axl_aipu_class, &class_attr_version.attr);
 err_class:
-	class_destroy(axlaipu_class);
+	class_destroy(axl_aipu_class);
 err:
 	return retval;
 }
 
-static void __exit axlaipu_exit(void)
+static void __exit axl_aipu_exit(void)
 {
 	pci_unregister_driver(&axl_aipu_pci_driver);
 
-	unregister_chrdev_region(MKDEV(axlaipu_major, 0), AXLAIPU_MAX_MINORS);
+	unregister_chrdev_region(MKDEV(axl_aipu_major, 0), AXL_AIPU_MAX_MINORS);
 
-	class_remove_file(axlaipu_class, &class_attr_version.attr);
-	class_destroy(axlaipu_class);
+	class_remove_file(axl_aipu_class, &class_attr_version.attr);
+	class_destroy(axl_aipu_class);
 
-	axlaipu_drv_debugfs_exit();
-	pr_debug("axlaipu: module successfully removed\n");
+	axl_aipu_drv_debugfs_exit();
+	pr_debug("axl_aipu: module successfully removed\n");
 }
 
-module_init(axlaipu_init);
-module_exit(axlaipu_exit);
+module_init(axl_aipu_init);
+module_exit(axl_aipu_exit);
 
 MODULE_VERSION(DRIVER_VERSION);
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 16, 0)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
+#ifdef RHEL_RELEASE_CODE
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(10, 0)
 MODULE_IMPORT_NS("DMA_BUF");
 #else
 MODULE_IMPORT_NS(DMA_BUF);
 #endif
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("DMA_BUF");
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 16, 0)
+MODULE_IMPORT_NS(DMA_BUF);
 #endif

@@ -1,16 +1,18 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Copyright (c) 2025 Axelera AI. All rights reserved.  */
-#ifndef TRITON_PCIE_EDMA_H
-#define TRITON_PCIE_EDMA_H
+#ifndef AXL_AIPU_PCIE_EDMA_H
+#define AXL_AIPU_PCIE_EDMA_H
 
 #ifndef BIT
 #define BIT(nr) (1 << (nr))
-#endif
+#endif // AXL_AIPU_PCIE_EDMA_H
 
-#define EDMA_L2_BASE 0x0000000008000000
-#define EDMA_L2_SIZE 0x0000000002000000
+/* This is kept for backward compatibility with firmware versions up to 1.5.0 */
+#define EDMA_L2_BASE		      0x0000000008000000
+#define EDMA_L2_SIZE		      0x0000000002000000
+#define EDMA_L2_LINKED_LIST_DESC_SIZE (sizeof(struct dw_edma_ll_buf))
 #define EDMA_L2_LINKED_LIST_DESC_OFF \
-	(EDMA_L2_SIZE - sizeof(struct dw_edma_ll_buf))
+	(EDMA_L2_SIZE - EDMA_L2_LINKED_LIST_DESC_SIZE)
 #define EDMA_L2_LINKED_LIST_DESC_BASE \
 	(EDMA_L2_BASE + EDMA_L2_LINKED_LIST_DESC_OFF)
 
@@ -461,4 +463,29 @@ __edma_ch(volatile struct dw_edma_v0_regs *edma, enum dw_edma_dir dir, int ch)
 #define LL_GET_64_RDCH(ll, channel, index, name) \
 	readq(&(ll->ch[channel].rd[index].name))
 
-#endif
+/* Host memory descriptor access macros (direct memory access, not MMIO) */
+#define LL_SET_RW_32_HOST(ll, dir, channel, index, name, value)   \
+	do {                                                      \
+		if (dir == DW_EDMA_DIR_WRITE)                     \
+			ll->ch[channel].wr[index].name = (value); \
+		else                                              \
+			ll->ch[channel].rd[index].name = (value); \
+	} while (0)
+
+#define LL_SET_RW_64_HOST(ll, dir, channel, index, name, value)       \
+	do {                                                          \
+		if (dir == DW_EDMA_DIR_WRITE)                         \
+			ll->ch[channel].wr[index].name.reg = (value); \
+		else                                                  \
+			ll->ch[channel].rd[index].name.reg = (value); \
+	} while (0)
+
+#define LL_GET_RW_32_HOST(ll, dir, channel, index, name)                 \
+	(((dir) == DW_EDMA_DIR_WRITE) ? ll->ch[channel].wr[index].name : \
+					ll->ch[channel].rd[index].name)
+
+#define LL_GET_RW_64_HOST(ll, dir, channel, index, name)                     \
+	(((dir) == DW_EDMA_DIR_WRITE) ? ll->ch[channel].wr[index].name.reg : \
+					ll->ch[channel].rd[index].name.reg)
+
+#endif // AXL_AIPU_PCIE_EDMA_H

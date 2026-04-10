@@ -33,16 +33,18 @@
 #include <linux/delay.h>
 #include <linux/dma-buf.h>
 #include <linux/poll.h>
+#include <linux/circ_buf.h>
 
-#include "metis-dmabuf.h"
-#include "metis.h"
-#include "metis-pcie-edma.h"
-#include "metis-edma-core.h"
-#include "metis-version.h"
+#include "axl-aipu-dmabuf.h"
+#include "axl-aipu.h"
+#include "axl-aipu-pcie-edma.h"
+#include "axl-aipu-edma-core.h"
+#include "axl-aipu-version.h"
 
-extern struct dentry *axlaipu_debugfs_root;
-static ssize_t edma_debugfs_info_read(struct file *file, char __user *user_buf,
-				      size_t count, loff_t *ppos)
+extern struct dentry *axl_aipu_debugfs_root;
+static ssize_t axl_aipu_edma_debugfs_info_read(struct file *file,
+					       char __user *user_buf,
+					       size_t count, loff_t *ppos)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	struct pci_dev *pdev = axldev->pdev;
@@ -81,34 +83,16 @@ static ssize_t edma_debugfs_info_read(struct file *file, char __user *user_buf,
 	}
 	mutex_unlock(&axldev->mutex);
 
-	if (axldev->hdrv_base) {
-		struct device_host_drv_t *hdrv = axldev->hdrv_base;
-		struct device_virt_msi_t *vmsi =
-			(struct device_virt_msi_t *)axldev->dma_va;
-		off += scnprintf(strbuf + off, size - off,
-				 "\tHDRV Information:\n\n");
-		off += scnprintf(
-			strbuf + off, size - off,
-			"\t\tHDRV ctrl 0x%08x base 0x%08x target 0x%016llx | size 0x%08x:\n",
-			hdrv->ctrl, hdrv->base, hdrv->target, hdrv->size);
-		off += scnprintf(strbuf + off, size - off,
-				 "\tVirtual MSI:\n\n");
-		for (i = 0; i < MAX_MSI; i++) {
-			off += scnprintf(strbuf + off, size - off,
-					 "\t\tVMSI %d: data 0x%0x\n", i,
-					 vmsi->msi[i]);
-		}
-	}
 	ret = simple_read_from_buffer(user_buf, count, ppos, strbuf, off);
 	kfree(strbuf);
 
 	return ret;
 }
 
-static const struct file_operations edma_debugfs_info_fops = {
+static const struct file_operations axl_aipu_edma_debugfs_info_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
-	.read = edma_debugfs_info_read,
+	.read = axl_aipu_edma_debugfs_info_read,
 };
 
 #define SHOW_EDMA_SW_CH32(offset, reg, channel)                      \
@@ -117,9 +101,10 @@ static const struct file_operations edma_debugfs_info_fops = {
 		  DMA_##offset##_##channel,                          \
 		  edma->type.unroll.ch[channel].reg);
 
-static ssize_t edma_debugfs_dbg_ch_regs_read(struct file *file,
-					     char __user *user_buf,
-					     size_t count, loff_t *ppos)
+static ssize_t axl_aipu_edma_debugfs_dbg_ch_regs_read(struct file *file,
+						      char __user *user_buf,
+						      size_t count,
+						      loff_t *ppos)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	volatile struct dw_edma_v0_regs *edma = axldev->dma;
@@ -228,10 +213,10 @@ static ssize_t edma_debugfs_dbg_ch_regs_read(struct file *file,
 	return ret;
 }
 
-static const struct file_operations edma_debugfs_dbg_ch_regs_fops = {
+static const struct file_operations axl_aipu_edma_debugfs_dbg_ch_regs_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
-	.read = edma_debugfs_dbg_ch_regs_read,
+	.read = axl_aipu_edma_debugfs_dbg_ch_regs_read,
 };
 
 #define SHOW_EDMA_SW_REG32(offset, reg)                                \
@@ -239,9 +224,9 @@ static const struct file_operations edma_debugfs_dbg_ch_regs_fops = {
 		  __stringify(DMA_##offset##_OFF), DMA_##offset##_OFF, \
 		  edma->reg);
 
-static ssize_t edma_debugfs_dbg_regs_read(struct file *file,
-					  char __user *user_buf, size_t count,
-					  loff_t *ppos)
+static ssize_t axl_aipu_edma_debugfs_dbg_regs_read(struct file *file,
+						   char __user *user_buf,
+						   size_t count, loff_t *ppos)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	volatile struct dw_edma_v0_regs *edma = axldev->dma;
@@ -315,16 +300,16 @@ static ssize_t edma_debugfs_dbg_regs_read(struct file *file,
 	return ret;
 }
 
-static const struct file_operations edma_debugfs_dbg_regs_fops = {
+static const struct file_operations axl_aipu_edma_debugfs_dbg_regs_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
-	.read = edma_debugfs_dbg_regs_read,
+	.read = axl_aipu_edma_debugfs_dbg_regs_read,
 };
 
-static ssize_t edma_debugfs_dbg_rd_chx_ll_write(struct file *file,
-						const char __user *ubuf,
-						size_t size, loff_t *offp,
-						int channel)
+static ssize_t
+axl_aipu_edma_debugfs_dbg_rd_chx_ll_write(struct file *file,
+					  const char __user *ubuf, size_t size,
+					  loff_t *offp, int channel)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	volatile struct dw_edma_v0_regs *edma = axldev->dma;
@@ -345,10 +330,11 @@ static ssize_t edma_debugfs_dbg_rd_chx_ll_write(struct file *file,
 	return size;
 }
 
-static ssize_t edma_debugfs_dbg_rd_chx_ll_read(struct file *file,
-					       char __user *user_buf,
-					       size_t count, loff_t *ppos,
-					       int channel)
+static ssize_t axl_aipu_edma_debugfs_dbg_rd_chx_ll_read(struct file *file,
+							char __user *user_buf,
+							size_t count,
+							loff_t *ppos,
+							int channel)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	volatile struct dw_edma_v0_regs *edma = axldev->dma;
@@ -423,37 +409,38 @@ out_rd_chx_ll:
 	return ret;
 }
 
-#define TR_DBFS_RD_CHX_LL(_channel)                                            \
-	static ssize_t edma_debugfs_dbg_rd_ch##_channel##_ll_write(            \
-		struct file *file, const char __user *user_buf, size_t count,  \
-		loff_t *ppos)                                                  \
-	{                                                                      \
-		return edma_debugfs_dbg_rd_chx_ll_write(file, user_buf, count, \
-							ppos, _channel);       \
-	}                                                                      \
-	static ssize_t edma_debugfs_dbg_rd_ch##_channel##_ll_read(             \
-		struct file *file, char __user *user_buf, size_t count,        \
-		loff_t *ppos)                                                  \
-	{                                                                      \
-		return edma_debugfs_dbg_rd_chx_ll_read(file, user_buf, count,  \
-						       ppos, _channel);        \
-	}                                                                      \
-	static const struct file_operations                                    \
-		edma_debugfs_dbg_rd_ch##_channel##_ll_fops = {                 \
-			.owner = THIS_MODULE,                                  \
-			.open = simple_open,                                   \
-			.read = edma_debugfs_dbg_rd_ch##_channel##_ll_read,    \
-			.write = edma_debugfs_dbg_rd_ch##_channel##_ll_write,  \
+#define TR_DBFS_RD_CHX_LL(_channel)                                                   \
+	static ssize_t axl_aipu_edma_debugfs_dbg_rd_ch##_channel##_ll_write(          \
+		struct file *file, const char __user *user_buf, size_t count,         \
+		loff_t *ppos)                                                         \
+	{                                                                             \
+		return axl_aipu_edma_debugfs_dbg_rd_chx_ll_write(                     \
+			file, user_buf, count, ppos, _channel);                       \
+	}                                                                             \
+	static ssize_t axl_aipu_edma_debugfs_dbg_rd_ch##_channel##_ll_read(           \
+		struct file *file, char __user *user_buf, size_t count,               \
+		loff_t *ppos)                                                         \
+	{                                                                             \
+		return axl_aipu_edma_debugfs_dbg_rd_chx_ll_read(                      \
+			file, user_buf, count, ppos, _channel);                       \
+	}                                                                             \
+	static const struct file_operations                                           \
+		axl_aipu_edma_debugfs_dbg_rd_ch##_channel##_ll_fops = {               \
+			.owner = THIS_MODULE,                                         \
+			.open = simple_open,                                          \
+			.read = axl_aipu_edma_debugfs_dbg_rd_ch##_channel##_ll_read,  \
+			.write =                                                      \
+				axl_aipu_edma_debugfs_dbg_rd_ch##_channel##_ll_write, \
 		}
 TR_DBFS_RD_CHX_LL(0);
 TR_DBFS_RD_CHX_LL(1);
 TR_DBFS_RD_CHX_LL(2);
 TR_DBFS_RD_CHX_LL(3);
 
-static ssize_t edma_debugfs_dbg_wr_chx_ll_write(struct file *file,
-						const char __user *ubuf,
-						size_t size, loff_t *offp,
-						int channel)
+static ssize_t
+axl_aipu_edma_debugfs_dbg_wr_chx_ll_write(struct file *file,
+					  const char __user *ubuf, size_t size,
+					  loff_t *offp, int channel)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	volatile struct dw_edma_v0_regs *edma = axldev->dma;
@@ -474,10 +461,11 @@ static ssize_t edma_debugfs_dbg_wr_chx_ll_write(struct file *file,
 	return size;
 }
 
-static ssize_t edma_debugfs_dbg_wr_chx_ll_read(struct file *file,
-					       char __user *user_buf,
-					       size_t count, loff_t *ppos,
-					       int channel)
+static ssize_t axl_aipu_edma_debugfs_dbg_wr_chx_ll_read(struct file *file,
+							char __user *user_buf,
+							size_t count,
+							loff_t *ppos,
+							int channel)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	volatile struct dw_edma_v0_regs *edma = axldev->dma;
@@ -554,36 +542,37 @@ out_wr_chx_ll:
 	return ret;
 }
 
-#define TR_DBFS_WR_CHX_LL(_channel)                                            \
-	static ssize_t edma_debugfs_dbg_wr_ch##_channel##_ll_write(            \
-		struct file *file, const char __user *user_buf, size_t count,  \
-		loff_t *ppos)                                                  \
-	{                                                                      \
-		return edma_debugfs_dbg_wr_chx_ll_write(file, user_buf, count, \
-							ppos, _channel);       \
-	}                                                                      \
-	static ssize_t edma_debugfs_dbg_wr_ch##_channel##_ll_read(             \
-		struct file *file, char __user *user_buf, size_t count,        \
-		loff_t *ppos)                                                  \
-	{                                                                      \
-		return edma_debugfs_dbg_wr_chx_ll_read(file, user_buf, count,  \
-						       ppos, _channel);        \
-	}                                                                      \
-	static const struct file_operations                                    \
-		edma_debugfs_dbg_wr_ch##_channel##_ll_fops = {                 \
-			.owner = THIS_MODULE,                                  \
-			.open = simple_open,                                   \
-			.read = edma_debugfs_dbg_wr_ch##_channel##_ll_read,    \
-			.write = edma_debugfs_dbg_wr_ch##_channel##_ll_write,  \
+#define TR_DBFS_WR_CHX_LL(_channel)                                                   \
+	static ssize_t axl_aipu_edma_debugfs_dbg_wr_ch##_channel##_ll_write(          \
+		struct file *file, const char __user *user_buf, size_t count,         \
+		loff_t *ppos)                                                         \
+	{                                                                             \
+		return axl_aipu_edma_debugfs_dbg_wr_chx_ll_write(                     \
+			file, user_buf, count, ppos, _channel);                       \
+	}                                                                             \
+	static ssize_t axl_aipu_edma_debugfs_dbg_wr_ch##_channel##_ll_read(           \
+		struct file *file, char __user *user_buf, size_t count,               \
+		loff_t *ppos)                                                         \
+	{                                                                             \
+		return axl_aipu_edma_debugfs_dbg_wr_chx_ll_read(                      \
+			file, user_buf, count, ppos, _channel);                       \
+	}                                                                             \
+	static const struct file_operations                                           \
+		axl_aipu_edma_debugfs_dbg_wr_ch##_channel##_ll_fops = {               \
+			.owner = THIS_MODULE,                                         \
+			.open = simple_open,                                          \
+			.read = axl_aipu_edma_debugfs_dbg_wr_ch##_channel##_ll_read,  \
+			.write =                                                      \
+				axl_aipu_edma_debugfs_dbg_wr_ch##_channel##_ll_write, \
 		}
 TR_DBFS_WR_CHX_LL(0);
 TR_DBFS_WR_CHX_LL(1);
 TR_DBFS_WR_CHX_LL(2);
 TR_DBFS_WR_CHX_LL(3);
 
-static ssize_t edma_debugfs_dma_stat_read(struct file *file,
-					  char __user *user_buf, size_t count,
-					  loff_t *ppos)
+static ssize_t axl_aipu_edma_debugfs_dma_stat_read(struct file *file,
+						   char __user *user_buf,
+						   size_t count, loff_t *ppos)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	struct dma_queue_ctrl *dma_ctrl;
@@ -676,9 +665,9 @@ static ssize_t edma_debugfs_dma_stat_read(struct file *file,
 
 	return ret;
 }
-static ssize_t edma_debugfs_dma_stat_write(struct file *file,
-					   const char __user *user_buf,
-					   size_t size, loff_t *ppos)
+static ssize_t axl_aipu_edma_debugfs_dma_stat_write(struct file *file,
+						    const char __user *user_buf,
+						    size_t size, loff_t *ppos)
 {
 	struct axl_pcie_aipu_dev *axldev = file->private_data;
 	int ret, i, val;
@@ -727,58 +716,201 @@ static ssize_t edma_debugfs_dma_stat_write(struct file *file,
 
 	return size;
 }
-static const struct file_operations edma_debugfs_dma_stat_fops = {
+static const struct file_operations axl_aipu_edma_debugfs_dma_stat_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
-	.read = edma_debugfs_dma_stat_read,
-	.write = edma_debugfs_dma_stat_write,
+	.read = axl_aipu_edma_debugfs_dma_stat_read,
+	.write = axl_aipu_edma_debugfs_dma_stat_write,
 };
 
-void edma_dev_debugfs_init(struct axl_pcie_aipu_dev *axldev)
+/**
+ * dma_trace_read - Read DMA traces from circular buffer
+ *
+ * Output format (one line per entry):
+ * [timestamp] MODE CH# dur=<ns> req=<ns> wq=<ns> start=<ns> end=<ns> size=<bytes> sgt=<count>
+ */
+static ssize_t axl_aipu_dma_trace_read(struct file *file, char __user *user_buf,
+				       size_t count, loff_t *ppos)
 {
-	struct pci_dev *pdev = axldev->pdev;
-	struct dentry *dentry;
-	char name[NAME_SIZE];
+	struct axl_pcie_aipu_dev *axldev = file->private_data;
+	struct dma_trace_buffer *tb = axldev->trace_buf;
+	char *buf;
+	size_t buf_size, ret = 0;
+	unsigned long head, tail, i;
+	unsigned long flags;
+	unsigned int entries_to_read;
 
-	if (!axlaipu_debugfs_root)
-		return;
+	if (!tb)
+		return -ENXIO;
 
-	snprintf(name, NAME_SIZE, "%s-%s", axldev->dev_info->devname,
-		 dev_name(&pdev->dev));
-	dentry = debugfs_create_dir(name, axlaipu_debugfs_root);
-	if (IS_ERR(dentry)) {
-		dev_err(&pdev->dev, "Failed to create debugfs directory %s\n",
-			name);
-		return;
+	/* Allocate temporary buffer sized for all entries
+	 * Estimate ~150 bytes per entry line + 2KB for header */
+	buf_size = (tb->size * 150) + 2048;
+	/* Cap at 16MB for safety */
+	buf_size = min_t(size_t, buf_size, 16 * 1024 * 1024);
+	buf = kmalloc(buf_size, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&tb->lock, flags);
+
+	/* Snapshot head/tail */
+	head = tb->head;
+	tail = tb->tail;
+
+	/* Calculate number of valid entries */
+	entries_to_read = CIRC_CNT(head, tail, tb->size);
+
+	/* Add header with stats */
+	ret += scnprintf(buf + ret, buf_size - ret,
+			 "DMA Trace Buffer Status:\n");
+	ret += scnprintf(buf + ret, buf_size - ret, "  Enabled: %s\n",
+			 atomic_read(&tb->enabled) ? "yes" : "no");
+	ret += scnprintf(buf + ret, buf_size - ret, "  Total traces: %llu\n",
+			 atomic64_read(&tb->total_traces));
+	ret += scnprintf(buf + ret, buf_size - ret, "  Overruns: %llu\n",
+			 atomic64_read(&tb->overruns));
+	ret += scnprintf(buf + ret, buf_size - ret,
+			 "  Buffer size: %u entries\n", tb->size);
+	ret += scnprintf(buf + ret, buf_size - ret, "  Current entries: %u\n\n",
+			 entries_to_read);
+
+	/* Iterate through valid entries from tail to head */
+	for (i = 0; i < entries_to_read && ret < buf_size - 256; i++) {
+		unsigned long idx = (tail + i) & tb->size_mask;
+		struct dma_trace_entry *e = &tb->entries[idx];
+
+		ret += scnprintf(buf + ret, buf_size - ret,
+				 "%s, CH%d, %llu, %llu, %llu, %llu, %lu\n",
+				 e->mode, e->channel, e->ktime_ns,
+				 e->ktime_wq_ns, e->ktime_dma_start_ns,
+				 e->ktime_dma_end_ns, e->transfer_size);
 	}
-	axldev->dentry = dentry;
-	dev_info(&pdev->dev, "Register directory %s\n", name);
-	debugfs_create_file("info", 0444, dentry, axldev,
-			    &edma_debugfs_info_fops);
-	debugfs_create_file("dma-ch-regs", 0444, dentry, axldev,
-			    &edma_debugfs_dbg_ch_regs_fops);
-	debugfs_create_file("dma-regs", 0444, dentry, axldev,
-			    &edma_debugfs_dbg_regs_fops);
-	debugfs_create_file("dma-rd-ch0-ll", 0444, dentry, axldev,
-			    &edma_debugfs_dbg_rd_ch0_ll_fops);
-	debugfs_create_file("dma-rd-ch1-ll", 0444, dentry, axldev,
-			    &edma_debugfs_dbg_rd_ch1_ll_fops);
-	debugfs_create_file("dma-rd-ch2-ll", 0444, dentry, axldev,
-			    &edma_debugfs_dbg_rd_ch2_ll_fops);
-	debugfs_create_file("dma-rd-ch3-ll", 0444, dentry, axldev,
-			    &edma_debugfs_dbg_rd_ch3_ll_fops);
-	debugfs_create_file("dma-wr-ch0-ll", 0444, dentry, axldev,
-			    &edma_debugfs_dbg_wr_ch0_ll_fops);
-	debugfs_create_file("dma-wr-ch1-ll", 0444, dentry, axldev,
-			    &edma_debugfs_dbg_wr_ch1_ll_fops);
-	debugfs_create_file("dma-wr-ch2-ll", 0444, dentry, axldev,
-			    &edma_debugfs_dbg_wr_ch2_ll_fops);
-	debugfs_create_file("dma-wr-ch3-ll", 0444, dentry, axldev,
-			    &edma_debugfs_dbg_wr_ch3_ll_fops);
-	debugfs_create_file("dma-statistics", 0444, dentry, axldev,
-			    &edma_debugfs_dma_stat_fops);
+
+	if (i < entries_to_read) {
+		ret += scnprintf(buf + ret, buf_size - ret,
+				 "... %lu more entries (buffer too small)\n",
+				 entries_to_read - i);
+	}
+
+	spin_unlock_irqrestore(&tb->lock, flags);
+
+	ret = simple_read_from_buffer(user_buf, count, ppos, buf, ret);
+	kfree(buf);
+
+	return ret;
 }
-void edma_dev_debugfs_exit(struct axl_pcie_aipu_dev *axldev)
+
+/**
+ * axl_aipu_dma_trace_write - Control DMA trace buffer
+ *
+ * Commands:
+ *   "clear"   - Clear buffer (reset head/tail)
+ *   "enable"  - Enable tracing
+ *   "disable" - Disable tracing
+ *   "reset"   - Clear buffer and reset counters
+ */
+static ssize_t axl_aipu_dma_trace_write(struct file *file,
+					const char __user *user_buf,
+					size_t count, loff_t *ppos)
+{
+	struct axl_pcie_aipu_dev *axldev = file->private_data;
+	struct dma_trace_buffer *tb = axldev->trace_buf;
+	char cmd[16];
+	unsigned long flags;
+	int len;
+
+	if (!tb)
+		return -ENXIO;
+
+	len = min_t(size_t, count, sizeof(cmd) - 1);
+	if (copy_from_user(cmd, user_buf, len))
+		return -EFAULT;
+	cmd[len] = '\0';
+
+	/* Trim newline */
+	if (len > 0 && cmd[len - 1] == '\n')
+		cmd[len - 1] = '\0';
+
+	if (strcmp(cmd, "clear") == 0) {
+		spin_lock_irqsave(&tb->lock, flags);
+		tb->head = 0;
+		tb->tail = 0;
+		spin_unlock_irqrestore(&tb->lock, flags);
+		dev_info(&axldev->pdev->dev, "DMA trace buffer cleared\n");
+
+	} else if (strcmp(cmd, "enable") == 0) {
+		atomic_set(&tb->enabled, 1);
+		dev_info(&axldev->pdev->dev, "DMA tracing enabled\n");
+
+	} else if (strcmp(cmd, "disable") == 0) {
+		atomic_set(&tb->enabled, 0);
+		dev_info(&axldev->pdev->dev, "DMA tracing disabled\n");
+
+	} else if (strcmp(cmd, "reset") == 0) {
+		spin_lock_irqsave(&tb->lock, flags);
+		tb->head = 0;
+		tb->tail = 0;
+		atomic64_set(&tb->overruns, 0);
+		atomic64_set(&tb->total_traces, 0);
+		spin_unlock_irqrestore(&tb->lock, flags);
+		dev_info(&axldev->pdev->dev, "DMA trace buffer reset\n");
+
+	} else {
+		dev_warn(
+			&axldev->pdev->dev,
+			"Unknown command. Use: clear, enable, disable, reset\n");
+		return -EINVAL;
+	}
+
+	return count;
+}
+
+static const struct file_operations axl_aipu_dma_trace_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.read = axl_aipu_dma_trace_read,
+	.write = axl_aipu_dma_trace_write,
+};
+
+void axl_aipu_edma_dev_debugfs_init(struct axl_pcie_aipu_dev *axldev)
+{
+	struct dentry *dentry;
+
+	if (!axldev->dentry)
+		return;
+	dentry = axldev->dentry;
+
+	dev_info(&axldev->pdev->dev, "Register directory %s-%s\n",
+		 axldev->dev_info->devname, dev_name(&axldev->pdev->dev));
+	debugfs_create_file("info", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_info_fops);
+	debugfs_create_file("dma-ch-regs", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_dbg_ch_regs_fops);
+	debugfs_create_file("dma-regs", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_dbg_regs_fops);
+	debugfs_create_file("dma-rd-ch0-ll", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_dbg_rd_ch0_ll_fops);
+	debugfs_create_file("dma-rd-ch1-ll", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_dbg_rd_ch1_ll_fops);
+	debugfs_create_file("dma-rd-ch2-ll", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_dbg_rd_ch2_ll_fops);
+	debugfs_create_file("dma-rd-ch3-ll", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_dbg_rd_ch3_ll_fops);
+	debugfs_create_file("dma-wr-ch0-ll", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_dbg_wr_ch0_ll_fops);
+	debugfs_create_file("dma-wr-ch1-ll", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_dbg_wr_ch1_ll_fops);
+	debugfs_create_file("dma-wr-ch2-ll", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_dbg_wr_ch2_ll_fops);
+	debugfs_create_file("dma-wr-ch3-ll", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_dbg_wr_ch3_ll_fops);
+	debugfs_create_file("dma-statistics", 0444, dentry, axldev,
+			    &axl_aipu_edma_debugfs_dma_stat_fops);
+	debugfs_create_file("dma-trace", 0644, dentry, axldev,
+			    &axl_aipu_dma_trace_fops);
+}
+void axl_aipu_edma_dev_debugfs_exit(struct axl_pcie_aipu_dev *axldev)
 {
 	if (axldev->dentry) {
 		debugfs_remove_recursive(axldev->dentry);

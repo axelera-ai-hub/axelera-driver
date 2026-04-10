@@ -1,0 +1,5 @@
+@DRIVER_NAME@-dkms (@DRIVER_VERSION@) stable; urgency=low
+
+  * Automatically packaged by DKMS.
+
+ -- Axelera AI <axelera@axelera.ai>  Mon, 01 Sep 2025 12:00:00 +0000

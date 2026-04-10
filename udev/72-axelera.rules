@@ -1,0 +1,8 @@
+SUBSYSTEM=="uio", GROUP="axelera", MODE="0666"
+SUBSYSTEM=="misc", DEVPATH=="/devices/virtual/misc/dmabuf_triton_*", GROUP="axelera", MODE="0666"
+SUBSYSTEM=="metis", DEVPATH=="*/metis/triton*", GROUP="axelera", MODE="0666"
+SUBSYSTEM=="metis", DEVPATH=="*/metis/metis*", GROUP="axelera", MODE="0666"
+SUBSYSTEM=="metis", DEVPATH=="*/metis/europa*", GROUP="axelera", MODE="0666"
+SUBSYSTEM=="axlaipu", DEVPATH=="*/axlaipu/metis*", GROUP="axelera", MODE="0666"
+SUBSYSTEM=="axlaipu", DEVPATH=="*/axlaipu/europa*", GROUP="axelera", MODE="0666"
+SUBSYSTEM=="dma_heap", DEVPATH=="/devices/virtual/dma_heap/*", MODE="0666"

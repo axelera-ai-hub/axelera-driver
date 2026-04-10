@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Copyright (c) 2025 Axelera AI. All rights reserved.  */
-#ifndef __METIS_DMABUFH__
-#define __METIS_DMABUF_H__
+#ifndef __AXL_AIPU_DMABUF_H__
+#define __AXL_AIPU_DMABUF_H__
 
 struct dmabuf_import {
 	__u64 phy;
@@ -49,15 +49,15 @@ struct dma_p2p_xfer {
 };
 #define DMA_XFER_FLAG_P2P 0x80000000
 
-#define AXL_IOCTL_BASE	     'U'
-#define AXL_IOCTL_MSG_LOCK   _IOWR(AXL_IOCTL_BASE, 0, int)
-#define AXL_IOCTL_CTX_ALLOC  _IOWR(AXL_IOCTL_BASE, 1, int)
-#define AXL_IOCTL_CTX_FREE   _IOWR(AXL_IOCTL_BASE, 2, int)
-// #define AXL_IOCTL_EMPTY _IOWR(AXL_IOCTL_BASE, 3, int)
+#define AXL_IOCTL_BASE		   'U'
+#define AXL_IOCTL_MSG_LOCK	   _IOWR(AXL_IOCTL_BASE, 0, int)
+#define AXL_IOCTL_CTX_ALLOC	   _IOWR(AXL_IOCTL_BASE, 1, int)
+#define AXL_IOCTL_CTX_FREE	   _IOWR(AXL_IOCTL_BASE, 2, int)
+#define AXL_IOCTL_GET_DEV_PROPERTY _IOWR(AXL_IOCTL_BASE, 3, uint64_t)
 // #define AXL_IOCTL_EMPTY _IOWR(AXL_IOCTL_BASE, 4, int)
-#define AXL_IOCTL_DMA_ATTACH _IOWR(AXL_IOCTL_BASE, 5, int)
-#define AXL_IOCTL_DMA_DETACH _IOWR(AXL_IOCTL_BASE, 6, int)
-#define AXL_IOCTL_DMA_XFER   _IOWR(AXL_IOCTL_BASE, 7, struct dmabuf_xfer *)
+#define AXL_IOCTL_DMA_ATTACH	   _IOWR(AXL_IOCTL_BASE, 5, int)
+#define AXL_IOCTL_DMA_DETACH	   _IOWR(AXL_IOCTL_BASE, 6, int)
+#define AXL_IOCTL_DMA_XFER	   _IOWR(AXL_IOCTL_BASE, 7, struct dmabuf_xfer *)
 #define AXL_IOCTL_DMA_GET_XFER_ASYNC_STATUS \
 	_IOWR(AXL_IOCTL_BASE, 8, struct dmabuf_xfer *)
 #define AXL_IOCTL_DMA_GET_XFER_SYNC_STATUS \
@@ -73,6 +73,7 @@ struct dma_p2p_xfer {
 #define AXL_IOCTL_GET_PCIE_WINDOWS \
 	_IOR(AXL_IOCTL_BASE, 17, struct dev_mem_window)
 #define AXL_IOCTL_DMA_P2P_XFER	_IOWR(AXL_IOCTL_BASE, 18, struct dma_p2p_xfer)
+#define AXL_IOCTL_DYNMEM_LOAD	_IO(AXL_IOCTL_BASE, 19)
 #define AXL_IOCTL_GET_DMA_STATS _IOR(AXL_IOCTL_BASE, 32, struct dma_stats)
 
 enum {
@@ -93,4 +94,4 @@ struct dmabuf_imp {
 
 #endif // __KERNEL__
 
-#endif // __METIS_DMABUF_H__
+#endif // __AXL_AIPU_DMABUF_H__

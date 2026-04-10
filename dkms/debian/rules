@@ -1,0 +1,9 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+
+%:
+	dh $@ --with dkms
+
+# Skip dh_installchangelogs
+# We don't have a debian-compliant changelog for `metis`, so we don't install it
+override_dh_installchangelogs:
