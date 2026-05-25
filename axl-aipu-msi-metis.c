@@ -71,18 +71,16 @@ static int axl_aipu_msi_metis_init(struct axl_pcie_aipu_dev *axldev)
 		atomic_set(&axldev->irq_wrk[i].dma_done, 0);
 		INIT_LIST_HEAD(&axldev->irq_wrk[i].sctx_list);
 
-		/* Set up check callbacks for non-VMSI interrupts */
-		if (is_vmsi_enabled(axldev)) {
-			axldev->irq_wrk[i].check = NULL;
-		} else {
-			/* Metis: set callbacks for kernel and DMA interrupts */
-			if (i >= PMSI_METIS_KRN_0 && i <= PMSI_METIS_KRN_3)
-				axldev->irq_wrk[i].check = krn_irq_ck;
-			else if (i >= PMSI_METIS_RD_CH0 &&
-				 i <= PMSI_METIS_WR_CH3)
+		axldev->irq_wrk[i].check = NULL;
+		/* DMA has internal status check in single MSI mode */
+		if (axldev->nmsi == 1) {
+			if (i >= PMSI_METIS_RD_CH0 && i <= PMSI_METIS_WR_CH3) {
 				axldev->irq_wrk[i].check = axl_aipu_dma_irq_ck;
-			else
-				axldev->irq_wrk[i].check = NULL;
+			} else if (!is_vmsi_enabled(axldev)) {
+				if (i >= PMSI_METIS_KRN_0 &&
+				    i <= PMSI_METIS_KRN_3)
+					axldev->irq_wrk[i].check = krn_irq_ck;
+			}
 		}
 	}
 
