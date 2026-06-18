@@ -116,9 +116,9 @@ static void axl_aipu_edma_dev_dynmem_init(struct axl_pcie_aipu_dev *axldev)
 	struct device_dma_sg_desc_t *dma_sg_desc;
 	struct device_sys_ctl_t *dsctl;
 
+	dsctl = axldev->vl2base;
 	dma_sg_desc = axl_aipu_get_dma_sg_desc_area(axldev);
 	if (dma_sg_desc) {
-		dsctl = axldev->vl2base;
 		axldev->desc_base = dma_sg_desc->dma_sg_desc_buf_ref.addr;
 		axldev->desc_offset =
 			axldev->desc_base - dsctl->memory_map[MEMORY_AREA_0];
@@ -131,6 +131,7 @@ static void axl_aipu_edma_dev_dynmem_init(struct axl_pcie_aipu_dev *axldev)
 		axldev->desc_base = EDMA_L2_LINKED_LIST_DESC_BASE;
 		axldev->desc_offset = EDMA_L2_LINKED_LIST_DESC_OFF;
 	}
+	axldev->dma_vm = (dsctl->dma_vm == DMA_VM_SUPPORTED) ? 1 : 0;
 }
 
 static int axl_aipu_edma_dma_irq_ck(struct axl_pcie_aipu_dev *axldev, int id)
@@ -179,6 +180,9 @@ static void axl_aipu_edma_init_imwr(struct axl_pcie_aipu_dev *axldev)
 {
 	volatile struct dw_edma_v0_regs *edma = axldev->dma;
 
+	if (axldev->dma_vm)
+		return;
+
 	edma->wr_done_imwr.lsb = axldev->irq_msi.address_lo;
 	edma->wr_done_imwr.msb = axldev->irq_msi.address_hi;
 	edma->wr_abort_imwr.lsb = axldev->irq_msi.address_lo;
@@ -208,6 +212,10 @@ static void axl_aipu_edma_align_imwr(struct axl_pcie_aipu_dev *axldev)
 {
 	volatile struct dw_edma_v0_regs *edma = axldev->dma;
 	u32 imwr_data;
+
+	if (axldev->dma_vm)
+		return;
+
 	get_cached_msi_msg(axldev->irq_vec, &axldev->irq_msi);
 	if (axldev->nmsi != 1)
 		return;

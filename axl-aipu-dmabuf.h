@@ -72,9 +72,29 @@ struct dma_p2p_xfer {
 	_IOR(AXL_IOCTL_BASE, 16, struct dev_res_info)
 #define AXL_IOCTL_GET_PCIE_WINDOWS \
 	_IOR(AXL_IOCTL_BASE, 17, struct dev_mem_window)
-#define AXL_IOCTL_DMA_P2P_XFER	_IOWR(AXL_IOCTL_BASE, 18, struct dma_p2p_xfer)
-#define AXL_IOCTL_DYNMEM_LOAD	_IO(AXL_IOCTL_BASE, 19)
-#define AXL_IOCTL_GET_DMA_STATS _IOR(AXL_IOCTL_BASE, 32, struct dma_stats)
+#define AXL_IOCTL_DMA_P2P_XFER		_IOWR(AXL_IOCTL_BASE, 18, struct dma_p2p_xfer)
+#define AXL_IOCTL_DYNMEM_LOAD		_IO(AXL_IOCTL_BASE, 19)
+/* Firmware trace IOCTLs */
+#define AXL_IOCTL_FWTRACE_OPEN_SESSION	_IOW(AXL_IOCTL_BASE, 20, uint32_t)
+#define AXL_IOCTL_FWTRACE_CLOSE_SESSION _IO(AXL_IOCTL_BASE, 21)
+#define AXL_IOCTL_FWTRACE_GET_STATS \
+	_IOR(AXL_IOCTL_BASE, 22, struct fwtrace_stats)
+#define AXL_IOCTL_FWTRACE_ENABLE       _IOW(AXL_IOCTL_BASE, 23, uint32_t)
+#define AXL_IOCTL_FWTRACE_DISABLE      _IOW(AXL_IOCTL_BASE, 24, uint32_t)
+#define AXL_IOCTL_FWTRACE_CLEAR_BUFFER _IOW(AXL_IOCTL_BASE, 25, uint32_t)
+#define AXL_IOCTL_GET_DMA_STATS	       _IOR(AXL_IOCTL_BASE, 32, struct dma_stats)
+
+/**
+ * struct fwtrace_stats - Firmware trace statistics
+ * @total_bytes: Total bytes captured from firmware
+ * @overruns: Number of times kernel buffer overflowed
+ * @available_bytes: Current bytes available in kernel buffer
+ */
+struct fwtrace_stats {
+	uint64_t total_bytes;
+	uint64_t overruns;
+	uint64_t available_bytes;
+};
 
 enum {
 	ASYNC_XFER_DONE = 1,

@@ -42,6 +42,7 @@
 #include "axl-aipu.h"
 #include "axl-aipu-edma-core.h"
 #include "axl-aipu-hdma-core.h"
+#include "axl-aipu-fwtrace.h"
 #include "axl-aipu-version.h"
 #include "axl-aipu-msi.h"
 
@@ -136,6 +137,13 @@ static int sysctrl_open(struct inode *inode, struct file *file)
 	sys_ctx->axldev = axldev;
 	file->private_data = sys_ctx;
 
+	/* Initialize firmware trace session fields */
+	sys_ctx->fwtrace_mode = false;
+	INIT_LIST_HEAD(&sys_ctx->fwtrace_session.list);
+	init_waitqueue_head(&sys_ctx->fwtrace_session.wait_queue);
+	spin_lock_init(&sys_ctx->fwtrace_session.lock);
+	atomic64_set(&sys_ctx->fwtrace_session.overruns, 0);
+
 	dev_dbg(&pdev->dev, "open ctx by %d\n", current->pid);
 
 	return 0;
@@ -185,8 +193,15 @@ static void axl_aipu_sys_ctx_cleanup_func(struct work_struct *work)
 
 	dev_dbg(&pdev->dev, "Async cleanup: waiting for dma_wrk %p\n", dma_wrk);
 
-	/* Wait for work to complete */
-	flush_work(&dma_wrk->work);
+	/*
+	 * Use cancel_work_sync() rather than flush_work() to avoid the
+	 * kernel 5.15+ lockdep warning triggered by calling flush_work()
+	 * from within a workqueue worker context. cancel_work_sync() uses
+	 * from_cancel=true internally, bypassing the check, and is safe
+	 * here: on fd-close we either let the DMA work finish or cancel
+	 * it before freeing resources — both outcomes are correct.
+	 */
+	cancel_work_sync(&dma_wrk->work);
 
 	/* Now safe to release dmabuf and free sys_ctx */
 	kref_put(&dma_wrk->refcount, axl_aipu_dma_wrk_release);
@@ -327,6 +342,19 @@ static inline void axl_aipu_sysctrl_ctx_release(struct sysctrl_ctx *sys_ctx)
 	mutex_unlock(&axldev->mutex);
 }
 
+static ssize_t sysctrl_read(struct file *file, char __user *buf, size_t count,
+			    loff_t *ppos)
+{
+	struct sysctrl_ctx *sys_ctx = file->private_data;
+
+	/* If in firmware trace mode, delegate to trace read handler */
+	if (sys_ctx->fwtrace_mode)
+		return axl_fwtrace_read(file, buf, count, ppos);
+
+	/* Normal sysctl file doesn't support read */
+	return -EINVAL;
+}
+
 static int sysctrl_release(struct inode *inode, struct file *file)
 {
 	struct sysctrl_ctx *sys_ctx = file->private_data;
@@ -334,6 +362,10 @@ static int sysctrl_release(struct inode *inode, struct file *file)
 
 	if (sys_ctx->msg_flag)
 		mutex_unlock(&axldev->msg_mutex);
+
+	/* Cleanup firmware trace session if active */
+	if (sys_ctx->fwtrace_mode)
+		axl_fwtrace_close_session(file);
 
 	axl_aipu_sysctrl_poll_unregister(sys_ctx);
 	axl_aipu_sysctrl_ctx_release(sys_ctx);
@@ -369,6 +401,10 @@ static __poll_t sysctrl_poll(struct file *file, poll_table *wait)
 	struct axl_pcie_aipu_dev *axldev = sys_ctx->axldev;
 	struct pci_dev *pdev = axldev->pdev;
 
+	/* If in firmware trace mode, delegate to trace poll handler */
+	if (sys_ctx->fwtrace_mode)
+		return axl_fwtrace_poll(file, wait);
+
 	dev_dbg(&pdev->dev, "sysctrl_poll wait %p\n", sys_ctx);
 
 	poll_wait(file, &sys_ctx->poll_wait_queue, wait);
@@ -384,6 +420,7 @@ static struct file_operations axl_aipu_file_fops = {
 	.owner = THIS_MODULE,
 	.open = sysctrl_open,
 	.release = sysctrl_release,
+	.read = sysctrl_read,
 	.unlocked_ioctl = sysctl_ioctl,
 	.compat_ioctl = sysctl_ioctl,
 	.mmap = sysctl_mmap,
@@ -416,6 +453,7 @@ static ssize_t axl_aipu_restore_store(struct device *dev,
 		dev_err(&pdev->dev, "Failed to enable device\n");
 		return ret;
 	}
+	pci_set_master(pdev);
 	return count;
 }
 static DEVICE_ATTR(axl_aipu_restore, 0664, axl_aipu_restore_show,
@@ -440,15 +478,18 @@ static int axl_aipu_recovery(void *data)
 		dev_dbg(&axldev->pdev->dev, "link %x %x %x\n", lnksta,
 			PCI_EXP_LNKSTA_DLLLA, PCI_EXP_LNKSTA_LBMS);
 		if (link && !(lnksta & PCI_EXP_LNKSTA_DLLLA)) {
-			if (!axldev->dev_state)
+			if (!axldev->dev_state) {
 				dev_info(&pdev->dev, "Link down\n");
+				axl_aipu_fwtrace_kill_sessions(axldev);
+			}
 			axldev->dev_state = 1;
 		}
 
 		if (axldev->dev_state && (lnksta & PCI_EXP_LNKSTA_DLLLA)) {
 			dev_info(&pdev->dev, "Link up\n");
 			link = 1;
-			msleep(1000);
+			msleep(5000);
+			dev_dbg(&pdev->dev, "Wait FW init dynamic area\n");
 			pci_load_saved_state(pdev, axldev->pcie_state);
 			pci_restore_state(pdev);
 			ret = pci_enable_device(pdev);
@@ -457,10 +498,12 @@ static int axl_aipu_recovery(void *data)
 					"pci_enable_device failed (%d) ", ret);
 			else
 				axldev->dev_state = 0;
+			pci_set_master(pdev);
 			axl_aipu_dma_imwr_restore(axldev);
 			axl_aipu_config_dev_dma(axldev);
 			axl_aipu_config_dev_msi(axldev);
 			axl_aipu_dev_dynmem_init(axldev);
+			axl_aipu_fwtrace_refresh(axldev);
 		}
 
 		link = (lnksta & PCI_EXP_LNKSTA_DLLLA) ? 1 : 0;
@@ -929,6 +972,13 @@ axl_aipu_allocate_device(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 	axldev->pdev = pdev;
 	axldev->dev_info = (struct axe_device_info *)id->driver_data;
+	axldev->ctx_mask = devm_kcalloc(&pdev->dev,
+					axldev->dev_info->aicore_count,
+					sizeof(uint64_t), GFP_KERNEL);
+	if (!axldev->ctx_mask) {
+		dev_err(&pdev->dev, "cannot alloc ctx_mask\n");
+		return ERR_PTR(-ENOMEM);
+	}
 	snprintf(axldev->name, NAME_SIZE - 1, "%s-%x:%x:%x",
 		 axldev->dev_info->devname, pci_domain_nr(bus),
 		 pdev->bus->number, PCI_SLOT(pdev->devfn));
@@ -1260,6 +1310,15 @@ static int axl_aipu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (err)
 		goto err_dev_out;
 
+	/* Initialize firmware trace consumer */
+	err = axl_fwtrace_init(axldev);
+	if (err) {
+		dev_warn(&pdev->dev,
+			 "Failed to initialize firmware trace consumer: %d\n",
+			 err);
+		/* Non-fatal, continue */
+	}
+
 	axl_aipu_dev_debugfs_init(axldev);
 
 	return 0;
@@ -1276,12 +1335,48 @@ err_out:
 	return err;
 }
 
+/*
+ * axl_aipu_sync_irqs() - Wait for all MSI handlers to finish executing.
+ *
+ * Calls synchronize_irq() on every allocated MSI vector so that no interrupt
+ * handler is running (or pending) once this returns. Must be called after the
+ * device's interrupt generation has been stopped and before resources the
+ * handlers reference (e.g. the VMSI DMA buffer) are released.
+ */
+static void axl_aipu_sync_irqs(struct axl_pcie_aipu_dev *axldev)
+{
+	struct pci_dev *pdev = axldev->pdev;
+	int i;
+
+	for (i = 0; i < axldev->nmsi; i++)
+		synchronize_irq(pci_irq_vector(pdev, i));
+}
+
 static void axl_aipu_remove(struct pci_dev *pdev)
 {
 	struct axl_pcie_aipu_dev *axldev = pci_get_drvdata(pdev);
 	unsigned int minor = MINOR(axldev->cdev.dev);
 
+	/*
+	 * Stop the device from generating any further interrupts before
+	 * tearing anything down. pci_clear_master() clears Bus Master Enable,
+	 * which immediately stops bus-master MSI writes even if the link/FW is
+	 * gone. axl_aipu_sync_irqs() then drains any interrupt already latched
+	 * in the APIC or in-flight on another CPU, so no handler is running once
+	 * it returns. Only then is the VMSI DMA buffer (axldev->dma_va) safe to
+	 * release in axl_aipu_drv_dma_free().
+	 */
+	pci_clear_master(pdev);
+	axl_aipu_sync_irqs(axldev);
+
+	/* Cooperatively quiesce the device DMA engine (hdrv->ctrl = 0). */
+	axl_aipu_disable_dev_dma(pdev);
+
 	axl_aipu_dev_debugfs_exit(axldev);
+
+	/* Cleanup firmware trace consumer */
+	axl_fwtrace_cleanup(axldev);
+
 	device_destroy(axl_aipu_class, MKDEV(axl_aipu_major, axldev->minor));
 	cdev_del(&axldev->cdev);
 	axl_aipu_free_minor(axldev);
@@ -1320,6 +1415,7 @@ static void axl_io_resume(struct pci_dev *pdev)
 	ret = pci_enable_device(pdev);
 	if (ret)
 		dev_err(&pdev->dev, "pci_enable_device failed (%d) ", ret);
+	pci_set_master(pdev);
 }
 
 static void axl_aipu_shutdown(struct pci_dev *pdev)
@@ -1396,6 +1492,7 @@ static pci_ers_result_t axl_io_slot_reset(struct pci_dev *pdev)
 	}
 
 	pci_aer_clear_nonfatal_status(pdev);
+	pci_set_master(pdev);
 
 	return result;
 }
@@ -1418,7 +1515,9 @@ static void axl_reset_done(struct pci_dev *dev)
 static void axl_reset_prepare(struct pci_dev *dev)
 {
 	struct axl_pcie_aipu_dev *axldev = pci_get_drvdata(dev);
+
 	axldev->dev_state = 1;
+	axl_aipu_fwtrace_kill_sessions(axldev);
 	dev_info(&dev->dev, "axl reset notify:prepare\n");
 }
 
@@ -1640,6 +1739,8 @@ static void axl_aipu_dev_debugfs_init(struct axl_pcie_aipu_dev *axldev)
 
 	if (axldev->fops->dev_debugfs_init)
 		axldev->fops->dev_debugfs_init(axldev);
+
+	axl_fwtrace_debugfs_init(axldev, axldev->dentry);
 }
 
 static int __init axl_aipu_init(void)

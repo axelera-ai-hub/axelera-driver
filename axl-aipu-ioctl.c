@@ -37,6 +37,7 @@
 
 #include "axl-aipu-dmabuf.h"
 #include "axl-aipu.h"
+#include "axl-aipu-fwtrace.h"
 #include "axl-aipu-version.h"
 
 unsigned int enable_dmabuf_sync = 1;
@@ -70,25 +71,6 @@ static uint64_t axl_aipu_alloc_ctx(struct axl_pcie_aipu_dev *axldev,
 		}
 	}
 
-	return 0;
-}
-
-static int axl_aipu_find_free_dma_channel(struct axl_pcie_aipu_dev *axldev,
-					  int flags)
-{
-	int i, max_dma_ch = axldev->dev_info->dma_rd_ch;
-	struct dma_queue_ctrl *dma_ctrl;
-
-	if (flags & DMABUF_XFER_FLAG_READ) {
-		dma_ctrl = axldev->dma_rdqc;
-	} else if (flags & DMABUF_XFER_FLAG_WRITE) {
-		dma_ctrl = axldev->dma_wrqc;
-	}
-	for (i = 0; i < max_dma_ch; i++) {
-		if (atomic_read(&dma_ctrl[i].count) == 0) {
-			return i;
-		}
-	}
 	return 0;
 }
 
@@ -859,6 +841,7 @@ static long sysctl_ioctl_dynmem_load(struct file *file, unsigned long arg)
 	axl_aipu_config_dev_dma(axldev);
 	axl_aipu_config_dev_msi(axldev);
 	axl_aipu_dev_dynmem_init(axldev);
+	axl_aipu_fwtrace_refresh(axldev);
 
 	return 0;
 }
@@ -919,10 +902,6 @@ static long sysctl_ioctl_dma_get_xfer_async_status(struct file *file,
 
 	dev_dbg(&pdev->dev, "sys_ctx %p work %p async_dma_xfer %d\n", sys_ctx,
 		sys_ctx->dma_wrk, atomic_read(&sys_ctx->async_dma_xfer));
-	if (atomic_read(&sys_ctx->async_dma_xfer) == ASYNC_XFER_DONE) {
-		atomic_set(&sys_ctx->async_dma_xfer, 0);
-		return ASYNC_XFER_DONE;
-	}
 	return atomic_read(&sys_ctx->async_dma_xfer);
 }
 
@@ -1087,6 +1066,62 @@ long sysctl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case AXL_IOCTL_DYNMEM_LOAD:
 		ret = sysctl_ioctl_dynmem_load(file, arg);
 		break;
+	/* Firmware trace IOCTLs */
+	case AXL_IOCTL_FWTRACE_OPEN_SESSION: {
+		uint32_t source;
+		if (copy_from_user(&source, (void __user *)arg,
+				   sizeof(source))) {
+			ret = -EFAULT;
+			break;
+		}
+		ret = axl_fwtrace_open_session(file, source);
+		break;
+	}
+	case AXL_IOCTL_FWTRACE_CLOSE_SESSION:
+		ret = axl_fwtrace_close_session(file);
+		break;
+	case AXL_IOCTL_FWTRACE_GET_STATS: {
+		struct fwtrace_stats stats;
+		ret = axl_fwtrace_get_stats(file, &stats);
+		if (ret == 0) {
+			if (copy_to_user((void __user *)arg, &stats,
+					 sizeof(stats)))
+				ret = -EFAULT;
+		}
+		break;
+	}
+	case AXL_IOCTL_FWTRACE_ENABLE: {
+		struct sysctrl_ctx *sys_ctx = file->private_data;
+		uint32_t source;
+		if (copy_from_user(&source, (void __user *)arg,
+				   sizeof(source))) {
+			ret = -EFAULT;
+			break;
+		}
+		ret = axl_fwtrace_enable(sys_ctx->axldev, source);
+		break;
+	}
+	case AXL_IOCTL_FWTRACE_DISABLE: {
+		struct sysctrl_ctx *sys_ctx = file->private_data;
+		uint32_t source;
+		if (copy_from_user(&source, (void __user *)arg,
+				   sizeof(source))) {
+			ret = -EFAULT;
+			break;
+		}
+		ret = axl_fwtrace_disable(sys_ctx->axldev, source);
+		break;
+	}
+	case AXL_IOCTL_FWTRACE_CLEAR_BUFFER: {
+		uint32_t source;
+		if (copy_from_user(&source, (void __user *)arg,
+				   sizeof(source))) {
+			ret = -EFAULT;
+			break;
+		}
+		ret = axl_fwtrace_clear_buffer(file, source);
+		break;
+	}
 	default: ret = -ENOTTY; break;
 	}
 	return ret;

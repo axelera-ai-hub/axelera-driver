@@ -31,6 +31,7 @@
 #include "axl-aipu-dmabuf.h"
 #include "axl-aipu.h"
 #include "axl-aipu-msi.h"
+#include "axl-aipu-fwtrace.h"
 
 /* ============================================================================
  * Forward Declarations
@@ -297,6 +298,7 @@ static irqreturn_t axl_aipu_irq_fn(int irq, void *data)
 				dev_dbg(&pdev->dev, "HW VMSI %d (trigger %d)\n",
 					vmsi_id, id);
 			}
+			axl_fwtrace_hw_pmsi_handler(axldev, id);
 		} else {
 			/* FW-sourced: scan range for VMSI_IRQ_EN */
 			int vmsi_id;
@@ -312,6 +314,10 @@ static irqreturn_t axl_aipu_irq_fn(int irq, void *data)
 					complete(&axldev->irq_wrk[vmsi_id]
 							  .irq_done);
 					irq_poll_check(axldev, vmsi_id);
+					if (fwtrace_vmsi_is_source(
+						    &axldev->fwtrace, vmsi_id))
+						axl_fwtrace_msi_handler(
+							axldev, vmsi_id);
 					dev_dbg(&pdev->dev,
 						"FW VMSI %d in trigger %d\n",
 						vmsi_id, id);
@@ -374,6 +380,7 @@ static irqreturn_t axl_aipu_irq_common_fn(int irq, void *data)
 				complete(&axldev->irq_wrk[vmsi_id].irq_done);
 				irq_poll_check(axldev, vmsi_id);
 			}
+			axl_fwtrace_hw_pmsi_handler(axldev, trigger_id);
 		} else {
 			/* FW-sourced: scan range for VMSI_IRQ_EN */
 			int vmsi_id;
@@ -406,6 +413,10 @@ static irqreturn_t axl_aipu_irq_common_fn(int irq, void *data)
 								 .irq_done);
 						irq_poll_check(axldev, vmsi_id);
 					}
+					if (fwtrace_vmsi_is_source(
+						    &axldev->fwtrace, vmsi_id))
+						axl_fwtrace_msi_handler(
+							axldev, vmsi_id);
 				}
 			}
 		}

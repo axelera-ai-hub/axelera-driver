@@ -37,6 +37,7 @@
 #include "axl-aipu.h"
 #include "axl-aipu-pcie-hdma.h"
 #include "axl-aipu-hdma-core.h"
+#include "axl-aipu-fwtrace.h"
 #include "axl-aipu-version.h"
 
 extern struct dentry *axl_aipu_debugfs_root;
@@ -73,7 +74,7 @@ static ssize_t axl_aipu_hdma_debugfs_info_read(struct file *file,
 	off += scnprintf(strbuf + off, size - off, "\tContext ID:  0x%llx\n",
 			 axldev->glob_ctx_mask);
 	mutex_lock(&axldev->mutex);
-	for (i = 0; i < CONTEXT_COUNT; i++) {
+	for (i = 0; i < axldev->dev_info->aicore_count; i++) {
 		if (axldev->ctx_mask[i]) {
 			off += scnprintf(strbuf + off, size - off,
 					 "\t\tCTX %d: 0x%llx DMA %d MSI %d\n",

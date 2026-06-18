@@ -2,7 +2,7 @@
 
 obj-m += metis.o
 
-metis-y += axl-aipu-core.o axl-aipu-edma.o axl-aipu-edma-debugfs.o axl-aipu-hdma.o axl-aipu-hdma-debugfs.o axl-aipu-ioctl.o axl-aipu-msi.o axl-aipu-msi-metis.o
+metis-y += axl-aipu-core.o axl-aipu-edma.o axl-aipu-edma-debugfs.o axl-aipu-hdma.o axl-aipu-hdma-debugfs.o axl-aipu-ioctl.o axl-aipu-msi.o axl-aipu-msi-metis.o axl-aipu-fwtrace.o axl-aipu-fwtrace-debugfs.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)

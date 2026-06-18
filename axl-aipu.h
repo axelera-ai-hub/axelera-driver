@@ -23,11 +23,72 @@
 #define __AXL_AIPU_H__
 
 #ifdef __KERNEL__
+
+/* Datastream source identifiers matching stream_source_t in sysctl_mem.h.
+ * Defined here (before axl-aipu-fwtrace.h) because that header uses the type.
+ * Values are the direct firmware indices used in device_datastream_t.
+ * STREAM_SOURCE_RESERVED (0xFF) is the sentinel for "no source assigned". */
+typedef enum {
+	STREAM_SOURCE_CTRL_CORE_LOG = 0,
+	STREAM_SOURCE_CTRL_CORE_TRACE = 1,
+	STREAM_SOURCE_AICORE0_LOG = 5,
+	STREAM_SOURCE_AICORE0_TRACE = 6,
+	STREAM_SOURCE_AICORE1_LOG = 7,
+	STREAM_SOURCE_AICORE1_TRACE = 8,
+	STREAM_SOURCE_AICORE2_LOG = 9,
+	STREAM_SOURCE_AICORE2_TRACE = 10,
+	STREAM_SOURCE_AICORE3_LOG = 11,
+	STREAM_SOURCE_AICORE3_TRACE = 12,
+	STREAM_SOURCE_AICORE4_LOG = 13,
+	STREAM_SOURCE_AICORE4_TRACE = 14,
+	STREAM_SOURCE_AICORE5_LOG = 15,
+	STREAM_SOURCE_AICORE5_TRACE = 16,
+	STREAM_SOURCE_AICORE6_LOG = 17,
+	STREAM_SOURCE_AICORE6_TRACE = 18,
+	STREAM_SOURCE_AICORE7_LOG = 19,
+	STREAM_SOURCE_AICORE7_TRACE = 20,
+	STREAM_SOURCE_PVE_CORE0_LOG = 51,
+	STREAM_SOURCE_PVE_CORE0_TRACE = 52,
+	STREAM_SOURCE_PVE_CORE1_LOG = 53,
+	STREAM_SOURCE_PVE_CORE1_TRACE = 54,
+	STREAM_SOURCE_PVE_CORE2_LOG = 55,
+	STREAM_SOURCE_PVE_CORE2_TRACE = 56,
+	STREAM_SOURCE_PVE_CORE3_LOG = 57,
+	STREAM_SOURCE_PVE_CORE3_TRACE = 58,
+	STREAM_SOURCE_PVE_CORE4_LOG = 59,
+	STREAM_SOURCE_PVE_CORE4_TRACE = 60,
+	STREAM_SOURCE_PVE_CORE5_LOG = 61,
+	STREAM_SOURCE_PVE_CORE5_TRACE = 62,
+	STREAM_SOURCE_PVE_CORE6_LOG = 63,
+	STREAM_SOURCE_PVE_CORE6_TRACE = 64,
+	STREAM_SOURCE_PVE_CORE7_LOG = 65,
+	STREAM_SOURCE_PVE_CORE7_TRACE = 66,
+	STREAM_SOURCE_PVE_CORE8_LOG = 67,
+	STREAM_SOURCE_PVE_CORE8_TRACE = 68,
+	STREAM_SOURCE_PVE_CORE9_LOG = 69,
+	STREAM_SOURCE_PVE_CORE9_TRACE = 70,
+	STREAM_SOURCE_PVE_CORE10_LOG = 71,
+	STREAM_SOURCE_PVE_CORE10_TRACE = 72,
+	STREAM_SOURCE_PVE_CORE11_LOG = 73,
+	STREAM_SOURCE_PVE_CORE11_TRACE = 74,
+	STREAM_SOURCE_PVE_CORE12_LOG = 75,
+	STREAM_SOURCE_PVE_CORE12_TRACE = 76,
+	STREAM_SOURCE_PVE_CORE13_LOG = 77,
+	STREAM_SOURCE_PVE_CORE13_TRACE = 78,
+	STREAM_SOURCE_PVE_CORE14_LOG = 79,
+	STREAM_SOURCE_PVE_CORE14_TRACE = 80,
+	STREAM_SOURCE_PVE_CORE15_LOG = 81,
+	STREAM_SOURCE_PVE_CORE15_TRACE = 82,
+	STREAM_SOURCE_RESERVED = 255,
+	STREAM_SOURCE_MAX = 256,
+} stream_source_t;
+
+#include "axl-aipu-fwtrace.h"
+
 /* constants */
 #define MAX_MSG		  256
 #define MAX_MEMORY_AREA	  2
 #define AICORE_COUNT	  4
-#define CONTEXT_COUNT	  4
 #define NAME_SIZE	  32
 #define MAX_DMA_CHANNEL	  4
 #define DMA_SIZE	  (2 * 1024 * 1024)
@@ -42,9 +103,12 @@
  * sysctl substructures magic numbers
  * WARNING: not supposed to be changed - used for sanity check
  */
+#define SYSCTL_DATASTREAM_AREA_MAGIC  (0xF0F0)
 #define SYSCTL_HOST_DRV_AREA_MAGIC    (0xBAC1)
 #define SYSCTL_DMA_SG_DESC_AREA_MAGIC (0xD4D4)
 #define SYSCTL_VMSI_AREA_MAGIC	      (0xB5B5)
+
+#define DMA_VM_SUPPORTED (0xC1A0C1A0)
 
 #define MAX_VIRT_MSI	1024
 #define VMSI_IRQ_EN_BIT 0
@@ -182,9 +246,10 @@ struct device_sys_ctl_t {
 	struct version_t master_version; // 0x200
 	uint8_t pad2[6];
 	uint64_t memory_map[MAX_MEMORY_AREA]; // memory types to device phys. addr.
-	uint8_t pad3[32];
+	uint32_t dma_vm; // flag to verify the FW support DMA VM service
+	uint8_t pad3[28];
 	uint64_t fw_load_addr;
-	struct memory_reference_t logtrace_mem_ref;
+	struct memory_reference_t datastream_mem_ref;
 	struct memory_reference_t boardinfo_mem_ref;
 	struct memory_reference_t axemsg_mem_ref;
 	struct memory_reference_t ctx_mem_ref;
@@ -327,6 +392,7 @@ struct axl_pcie_aipu_dev {
 	char name[NAME_SIZE];
 	struct pci_dev *pdev;
 	int dma_enabled : 1;
+	int dma_vm : 1;
 	struct device_host_drv_t *hdrv_base;
 	dma_addr_t dma_addr;
 	dma_addr_t dma_addr_unaligned;
@@ -351,7 +417,7 @@ struct axl_pcie_aipu_dev {
 	struct mutex mutex;
 	struct mutex msg_mutex;
 	uint64_t glob_ctx_mask; // global context mask
-	uint64_t ctx_mask[CONTEXT_COUNT]; // per device context mask
+	uint64_t *ctx_mask; // per device context mask
 	// char
 	struct cdev cdev;
 	struct dentry *dentry;
@@ -379,7 +445,24 @@ struct axl_pcie_aipu_dev {
 	size_t desc_host_size; /* Size of descriptor buffer */
 	/* DMA trace buffer */
 	struct dma_trace_buffer *trace_buf; /* NULL if allocation failed */
+	/* Firmware trace consumer */
+	struct fwtrace_consumer fwtrace;
 };
+
+/**
+ * struct fwtrace_session - Per-file-descriptor trace session state
+ *
+ * Each open file descriptor in trace mode gets its own kfifo so that
+ * multiple concurrent readers all receive a full copy of the data.
+ */
+struct fwtrace_session {
+	struct kfifo fifo; /* Per-session kernel ring buffer */
+	spinlock_t lock; /* Protects fifo */
+	wait_queue_head_t wait_queue; /* For blocking reads */
+	atomic64_t overruns; /* Per-session overrun count */
+	struct list_head list; /* Link into fwtrace_buffer.sessions */
+};
+
 struct sysctrl_ctx {
 	struct kref refcount;
 	struct axl_pcie_aipu_dev *axldev;
@@ -391,6 +474,10 @@ struct sysctrl_ctx {
 	wait_queue_head_t poll_wait_queue;
 	atomic_t poll_event_cnt;
 	struct list_head node;
+	/* Firmware trace session fields */
+	bool fwtrace_mode; /* True if fd is in trace mode */
+	stream_source_t fwtrace_src; /* Which log source to read */
+	struct fwtrace_session fwtrace_session; /* Per-fd trace state */
 };
 
 struct dma_channel_stats {
@@ -531,6 +618,26 @@ static inline int get_timeout_ms(int timeout)
 			      msecs_to_jiffies(timeout * 1000);
 }
 
+extern unsigned int dma_timeout;
+
+static inline int
+axl_aipu_find_free_dma_channel(struct axl_pcie_aipu_dev *axldev, int flags)
+{
+	int i, max_dma_ch = axldev->dev_info->dma_rd_ch;
+	struct dma_queue_ctrl *dma_ctrl;
+
+	if (flags & DMABUF_XFER_FLAG_READ)
+		dma_ctrl = axldev->dma_rdqc;
+	else
+		dma_ctrl = axldev->dma_wrqc;
+
+	for (i = 0; i < max_dma_ch; i++) {
+		if (atomic_read(&dma_ctrl[i].count) == 0)
+			return i;
+	}
+	return 0;
+}
+
 static inline int validate_dma_xfer(struct dmabuf_xfer *dxfer,
 				    struct pci_dev *pdev)
 {
@@ -563,6 +670,12 @@ axl_aipu_get_dma_sg_desc_area(struct axl_pcie_aipu_dev *axldev)
 	}
 	return (struct device_dma_sg_desc_t *)((uintptr_t)dsctl +
 					       dsctl->dmasgdesc_mem_ref.offset);
+}
+
+static inline uint64_t axl_aipu_get_hdif_base(struct axl_pcie_aipu_dev *axldev)
+{
+	struct device_sys_ctl_t *dsctl = axldev->vl2base;
+	return dsctl->memory_map[0];
 }
 
 static inline struct device_vmsi_config_t *

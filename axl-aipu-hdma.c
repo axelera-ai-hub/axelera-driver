@@ -53,9 +53,9 @@ static void axl_aipu_hdma_dev_dynmem_init(struct axl_pcie_aipu_dev *axldev)
 	struct device_dma_sg_desc_t *dma_sg_desc;
 	struct device_sys_ctl_t *dsctl;
 
+	dsctl = axldev->vl2base;
 	dma_sg_desc = axl_aipu_get_dma_sg_desc_area(axldev);
 	if (dma_sg_desc) {
-		dsctl = axldev->vl2base;
 		axldev->desc_base = dma_sg_desc->dma_sg_desc_buf_ref.addr;
 		axldev->desc_offset =
 			axldev->desc_base - dsctl->memory_map[MEMORY_AREA_0];
@@ -69,6 +69,7 @@ static void axl_aipu_hdma_dev_dynmem_init(struct axl_pcie_aipu_dev *axldev)
 		axldev->desc_offset =
 			HDMA_DESC_SIZE - sizeof(struct dw_hdma_ll_buf);
 	}
+	axldev->dma_vm = (dsctl->dma_vm == DMA_VM_SUPPORTED) ? 1 : 0;
 }
 
 static int axl_aipu_hdma_dma_irq_ck(struct axl_pcie_aipu_dev *axldev, int id)

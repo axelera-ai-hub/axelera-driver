@@ -31,6 +31,7 @@
 #include "axl-aipu-dmabuf.h"
 #include "axl-aipu.h"
 #include "axl-aipu-msi.h"
+#include "axl-aipu-fwtrace.h"
 
 static irqreturn_t axl_aipu_irq_fn_metis(int irq, void *data);
 static irqreturn_t axl_aipu_irq_common_fn_metis(int irq, void *data);
@@ -175,6 +176,8 @@ static irqreturn_t axl_aipu_irq_fn_metis(int irq, void *data)
 
 	complete(&irwq_elem->irq_done);
 	irq_poll_check(axldev, id);
+	if (fwtrace_vmsi_is_source(&axldev->fwtrace, id))
+		axl_fwtrace_msi_handler(axldev, id);
 	return IRQ_HANDLED;
 }
 
@@ -208,6 +211,9 @@ static irqreturn_t axl_aipu_irq_common_fn_metis(int irq, void *data)
 				atomic_inc(&axldev->vmsi_count[id]);
 				complete(&axldev->irq_wrk[id].irq_done);
 				irq_poll_check(axldev, id);
+				if (fwtrace_vmsi_is_source(&axldev->fwtrace,
+							   id))
+					axl_fwtrace_msi_handler(axldev, id);
 				continue;
 			}
 			if (NULL == axldev->irq_wrk[id].check)
