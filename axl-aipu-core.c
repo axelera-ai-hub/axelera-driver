@@ -1335,42 +1335,10 @@ err_out:
 	return err;
 }
 
-/*
- * axl_aipu_sync_irqs() - Wait for all MSI handlers to finish executing.
- *
- * Calls synchronize_irq() on every allocated MSI vector so that no interrupt
- * handler is running (or pending) once this returns. Must be called after the
- * device's interrupt generation has been stopped and before resources the
- * handlers reference (e.g. the VMSI DMA buffer) are released.
- */
-static void axl_aipu_sync_irqs(struct axl_pcie_aipu_dev *axldev)
-{
-	struct pci_dev *pdev = axldev->pdev;
-	int i;
-
-	for (i = 0; i < axldev->nmsi; i++)
-		synchronize_irq(pci_irq_vector(pdev, i));
-}
-
 static void axl_aipu_remove(struct pci_dev *pdev)
 {
 	struct axl_pcie_aipu_dev *axldev = pci_get_drvdata(pdev);
 	unsigned int minor = MINOR(axldev->cdev.dev);
-
-	/*
-	 * Stop the device from generating any further interrupts before
-	 * tearing anything down. pci_clear_master() clears Bus Master Enable,
-	 * which immediately stops bus-master MSI writes even if the link/FW is
-	 * gone. axl_aipu_sync_irqs() then drains any interrupt already latched
-	 * in the APIC or in-flight on another CPU, so no handler is running once
-	 * it returns. Only then is the VMSI DMA buffer (axldev->dma_va) safe to
-	 * release in axl_aipu_drv_dma_free().
-	 */
-	pci_clear_master(pdev);
-	axl_aipu_sync_irqs(axldev);
-
-	/* Cooperatively quiesce the device DMA engine (hdrv->ctrl = 0). */
-	axl_aipu_disable_dev_dma(pdev);
 
 	axl_aipu_dev_debugfs_exit(axldev);
 
