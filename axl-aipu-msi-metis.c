@@ -38,7 +38,7 @@ static irqreturn_t axl_aipu_irq_common_fn_metis(int irq, void *data);
 
 static int krn_irq_ck(struct axl_pcie_aipu_dev *axldev, int id)
 {
-	struct device_sys_ctl_t *dsctl = axldev->vl2base;
+	struct device_sys_ctl_t *dsctl = axldev->vbase;
 	struct device_ctx_t *devctx =
 		(struct device_ctx_t *)((uintptr_t)dsctl +
 					dsctl->ctx_mem_ref.offset);

@@ -107,19 +107,18 @@ static void __iomem *get_datastream_base(struct axl_pcie_aipu_dev *dev)
 	struct device_sys_ctl_t *dsctl;
 	struct memory_reference_t *memref;
 
-	if (!dev->vl2base) {
-		dev_err(&dev->pdev->dev, "L2 base not mapped\n");
+	if (!dev->vbase) {
+		dev_err(&dev->pdev->dev, "BAR2 base not mapped\n");
 		return NULL;
 	}
 
-	dsctl = (struct device_sys_ctl_t *)dev->vl2base;
+	dsctl = (struct device_sys_ctl_t *)dev->vbase;
 	if (dsctl->datastream_mem_ref.magic != SYSCTL_DATASTREAM_AREA_MAGIC) {
 		dev_dbg(&dev->pdev->dev,
 			"Datastream area not available (firmware not running)\n");
 		return NULL;
 	}
 	memref = &dsctl->datastream_mem_ref;
-
 	if (memref->size == 0 || memref->offset == 0) {
 		dev_dbg(&dev->pdev->dev,
 			"Datastream area not initialized (size=%u, offset=%llu)\n",
@@ -127,7 +126,7 @@ static void __iomem *get_datastream_base(struct axl_pcie_aipu_dev *dev)
 		return NULL;
 	}
 
-	return (void __iomem *)dev->vl2base + memref->offset;
+	return (void __iomem *)dev->vbase + memref->offset;
 }
 
 static int fwtrace_try_attach_datastream(struct axl_pcie_aipu_dev *dev);
@@ -334,7 +333,7 @@ static void fwtrace_pio_copy(struct axl_pcie_aipu_dev *dev,
 {
 	struct fwtrace_consumer *consumer = &dev->fwtrace;
 	uint64_t bar_off = rd->buf_addr - consumer->hdif_base;
-	void __iomem *ring_base = dev->vl2base + bar_off;
+	void __iomem *ring_base = dev->vbase + bar_off;
 
 	if (cl->first > 0)
 		memcpy_fromio(dst, ring_base + rd->read_pos, cl->first);
@@ -1015,11 +1014,18 @@ int axl_fwtrace_open_session(struct file *filp, stream_source_t source)
 
 	kbuf = &consumer->buffers[source];
 
-	/* Allocate and initialize per-session state */
-	ret = kfifo_alloc(&ctx->fwtrace_session.fifo, consumer->kfifo_size,
-			  GFP_KERNEL);
-	if (ret)
+	ctx->fwtrace_session.fifo_buf =
+		kvmalloc(consumer->kfifo_size, GFP_KERNEL);
+	if (!ctx->fwtrace_session.fifo_buf)
+		return -ENOMEM;
+
+	ret = kfifo_init(&ctx->fwtrace_session.fifo,
+			 ctx->fwtrace_session.fifo_buf, consumer->kfifo_size);
+	if (ret) {
+		kvfree(ctx->fwtrace_session.fifo_buf);
+		ctx->fwtrace_session.fifo_buf = NULL;
 		return ret;
+	}
 
 	spin_lock_init(&ctx->fwtrace_session.lock);
 	init_waitqueue_head(&ctx->fwtrace_session.wait_queue);
@@ -1081,7 +1087,8 @@ int axl_fwtrace_close_session(struct file *filp)
 	list_del(&ctx->fwtrace_session.list);
 	spin_unlock_irqrestore(&kbuf->sessions_lock, flags);
 
-	kfifo_free(&ctx->fwtrace_session.fifo);
+	kvfree(ctx->fwtrace_session.fifo_buf);
+	ctx->fwtrace_session.fifo_buf = NULL;
 
 	/* Decrement session count and stop polling if no more sessions */
 	new_count = atomic_dec_return(&kbuf->session_count);

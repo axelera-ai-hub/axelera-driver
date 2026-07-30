@@ -106,7 +106,6 @@ module_param(dma_trace_entries, uint, 0644);
 MODULE_PARM_DESC(dma_trace_entries,
 		 "DMA trace buffer entries (64 - 65536, default 4000)");
 
-static void axl_aipu_dma_imwr_restore(struct axl_pcie_aipu_dev *axldev);
 static void axl_aipu_disable_dev_dma(struct pci_dev *pdev);
 static void axl_aipu_dev_debugfs_init(struct axl_pcie_aipu_dev *axldev);
 
@@ -386,7 +385,8 @@ static int sysctl_mmap(struct file *file, struct vm_area_struct *vma)
 	if (vma->vm_pgoff >= MAX_METIS_MAPS)
 		return -EINVAL;
 
-	paddr = vma->vm_pgoff ? axldev->pdma : axldev->pl2base;
+	vm_flags_clear(vma, VM_EXEC | VM_MAYEXEC);
+	paddr = vma->vm_pgoff ? axldev->pdma : axldev->pbase;
 	if (remap_pfn_range(vma, vma->vm_start, paddr >> PAGE_SHIFT,
 			    vma->vm_end - vma->vm_start, vma->vm_page_prot)) {
 		return -ENOMEM;
@@ -475,8 +475,6 @@ static int axl_aipu_recovery(void *data)
 	int ret;
 	while (!kthread_should_stop()) {
 		pcie_capability_read_word(port, PCI_EXP_LNKSTA, &lnksta);
-		dev_dbg(&axldev->pdev->dev, "link %x %x %x\n", lnksta,
-			PCI_EXP_LNKSTA_DLLLA, PCI_EXP_LNKSTA_LBMS);
 		if (link && !(lnksta & PCI_EXP_LNKSTA_DLLLA)) {
 			if (!axldev->dev_state) {
 				dev_info(&pdev->dev, "Link down\n");
@@ -499,10 +497,10 @@ static int axl_aipu_recovery(void *data)
 			else
 				axldev->dev_state = 0;
 			pci_set_master(pdev);
-			axl_aipu_dma_imwr_restore(axldev);
 			axl_aipu_config_dev_dma(axldev);
 			axl_aipu_config_dev_msi(axldev);
 			axl_aipu_dev_dynmem_init(axldev);
+			axl_aipu_dma_imwr_restore(axldev);
 			axl_aipu_fwtrace_refresh(axldev);
 		}
 
@@ -566,7 +564,7 @@ static int axl_pci_msi_init(struct pci_dev *pdev,
 
 	return 0;
 }
-static void axl_aipu_dma_imwr_restore(struct axl_pcie_aipu_dev *axldev)
+void axl_aipu_dma_imwr_restore(struct axl_pcie_aipu_dev *axldev)
 {
 	get_cached_msi_msg(axldev->irq_vec, &axldev->irq_msi);
 	axl_aipu_dma_init_imwr(axldev);
@@ -658,6 +656,11 @@ static int axl_aipu_check_pes_group(struct pci_dev *pdev)
 	return upstream_port->bus->number;
 }
 
+/* PCI_STD_NUM_BARS not available in kernel < 5.7 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
+#define PCI_STD_NUM_BARS 6
+#endif
+
 static void axl_aipu_get_memwindow_info(struct axl_pcie_aipu_dev *axldev,
 					struct pci_dev *pdev)
 {
@@ -741,17 +744,22 @@ static int axl_aipu_pci_resources_init(struct axl_pcie_aipu_dev *axldev)
 	}
 	axldev->dma = pcim_iomap_table(pdev)[dma_bar];
 	axldev->pdma = pci_resource_start(pdev, dma_bar);
-	axldev->vl2base = pcim_iomap_table(pdev)[BAR_2];
-	axldev->pl2base = pci_resource_start(pdev, BAR_2);
+	axldev->vbase = pcim_iomap_table(pdev)[BAR_2];
+	axldev->pbase = pci_resource_start(pdev, BAR_2);
 
-	if (!axldev->dma || !axldev->vl2base) {
+	if (!axldev->dma || !axldev->vbase) {
 		dev_err(&pdev->dev, "Failed to map resources %p %p\n",
-			axldev->dma, axldev->vl2base);
+			axldev->dma, axldev->vbase);
 		return -EIO;
 	}
 
-	axldev->res_info->l2_base = axldev->pl2base;
-	axldev->res_info->l2_size = pci_resource_len(pdev, BAR_2);
+	if (axldev->dev_info->hw_gen == AXL_HW_GEN_METIS) {
+		axldev->res_info->l2_base = axldev->pbase;
+		axldev->res_info->l2_size = pci_resource_len(pdev, BAR_2);
+	} else if (axldev->dev_info->hw_gen >= AXL_HW_GEN_EUROPA) {
+		axldev->res_info->sysspm_base = axldev->pbase;
+		axldev->res_info->sysspm_size = pci_resource_len(pdev, BAR_2);
+	}
 	return 0;
 }
 
@@ -762,11 +770,16 @@ static int axl_aipu_pci_init(struct pci_dev *pdev,
 	u16 reg16, lnkctl2, lnksta;
 	u32 reg32, lnkcap;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
 	pci_aer_clear_nonfatal_status(pdev);
+#else
+	/* Use older API for kernel < 5.7 */
+	pci_cleanup_aer_uncorrect_error_status(pdev);
+#endif
+
 	err = pcim_enable_device(pdev);
 	if (err) {
 		dev_err(&pdev->dev, "pci_enable_device failed: %d\n", err);
-		axl_aipu_free_minor(axldev);
 		return err;
 	}
 	pci_set_master(pdev);
@@ -979,7 +992,11 @@ axl_aipu_allocate_device(struct pci_dev *pdev, const struct pci_device_id *id)
 		dev_err(&pdev->dev, "cannot alloc ctx_mask\n");
 		return ERR_PTR(-ENOMEM);
 	}
-	snprintf(axldev->name, NAME_SIZE - 1, "%s-%x:%x:%x",
+	snprintf(axldev->name, NAME_SIZE - 1, "%s-%x-%x-%x",
+		 axldev->dev_info->devname, pci_domain_nr(bus),
+		 pdev->bus->number, PCI_SLOT(pdev->devfn));
+
+	snprintf(axldev->compat_name, NAME_SIZE - 1, "%s-%x:%x:%x",
 		 axldev->dev_info->devname, pci_domain_nr(bus),
 		 pdev->bus->number, PCI_SLOT(pdev->devfn));
 
@@ -1005,7 +1022,7 @@ static void axl_aipu_register_msi_dev_fops(struct axl_pcie_aipu_dev *axldev)
 static struct device_host_drv_t *
 axl_aipu_get_hdrv_area(struct axl_pcie_aipu_dev *axldev)
 {
-	struct device_sys_ctl_t *dsctl = axldev->vl2base;
+	struct device_sys_ctl_t *dsctl = axldev->vbase;
 	if (dsctl->hdrv_mem_ref.magic != SYSCTL_HOST_DRV_AREA_MAGIC) {
 		dev_dbg(&axldev->pdev->dev, "Invalid hdrv magic %x\n",
 			dsctl->hdrv_mem_ref.magic);
@@ -1137,9 +1154,43 @@ static void axl_aipu_drv_dma_free(struct axl_pcie_aipu_dev *axldev)
 	}
 }
 
+static int axl_aipu_create_compat_symlink(struct device *dev,
+					  const char *old_name)
+{
+	struct kernfs_node *subsys_kn;
+	struct kobject *class_kobj;
+	int ret;
+
+	subsys_kn = sysfs_get_dirent(dev->kobj.sd, "subsystem");
+	if (!subsys_kn)
+		return -ENOENT;
+	class_kobj = (struct kobject *)subsys_kn->symlink.target_kn->priv;
+	ret = sysfs_create_link(class_kobj, &dev->kobj, old_name);
+	kernfs_put(subsys_kn);
+	if (ret)
+		dev_warn(dev, "failed to create compat sysfs link '%s': %d\n",
+			 old_name, ret);
+	return ret;
+}
+
+static void axl_aipu_remove_compat_symlink(struct device *dev,
+					   const char *old_name)
+{
+	struct kernfs_node *subsys_kn;
+	struct kobject *class_kobj;
+
+	subsys_kn = sysfs_get_dirent(dev->kobj.sd, "subsystem");
+	if (!subsys_kn)
+		return;
+	class_kobj = (struct kobject *)subsys_kn->symlink.target_kn->priv;
+	sysfs_remove_link(class_kobj, old_name);
+	kernfs_put(subsys_kn);
+}
+
 static int axl_aipu_create_device(struct axl_pcie_aipu_dev *axldev)
 {
 	struct pci_dev *pdev = axldev->pdev;
+	struct device *dev;
 	int err;
 
 	dev_dbg(&pdev->dev, "Add class dev %d:%d\n", axl_aipu_major,
@@ -1152,13 +1203,17 @@ static int axl_aipu_create_device(struct axl_pcie_aipu_dev *axldev)
 	}
 
 	dev_dbg(&pdev->dev, "device create\n");
-	if (IS_ERR(device_create(axl_aipu_class, &pdev->dev,
-				 MKDEV(axl_aipu_major, axldev->minor), axldev,
-				 "%s", axldev->name))) {
+	dev = device_create(axl_aipu_class, &pdev->dev,
+			    MKDEV(axl_aipu_major, axldev->minor), axldev, "%s",
+			    axldev->name);
+	if (IS_ERR(dev)) {
 		dev_err(&pdev->dev, "can't create device\n");
 		err = -ENOMEM;
 		return err;
 	}
+	axldev->class_dev = dev;
+	axl_aipu_create_compat_symlink(dev, axldev->compat_name);
+	axl_aipu_remove_compat_symlink(dev, axldev->name);
 	return 0;
 }
 #ifndef PCI_SUBDEVICE_ID_QEMU
@@ -1273,7 +1328,7 @@ static int axl_aipu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	err = axl_aipu_pci_init(pdev, axldev);
 	if (err)
-		goto err_out;
+		goto err_init_out;
 
 	axl_aipu_register_dev_fops(axldev);
 	axl_aipu_config_dev_msi(axldev);
@@ -1308,7 +1363,7 @@ static int axl_aipu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	err = axl_pci_msi_init(pdev, axldev);
 	if (err)
-		goto err_dev_out;
+		goto err_dev_dma_out;
 
 	/* Initialize firmware trace consumer */
 	err = axl_fwtrace_init(axldev);
@@ -1323,16 +1378,34 @@ static int axl_aipu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	return 0;
 
-err_dev_out:
+err_dev_dma_out:
 	axl_aipu_dma_deinit(axldev);
+	axl_aipu_remove_compat_symlink(axldev->class_dev, axldev->compat_name);
+err_dev_out:
 	device_destroy(axl_aipu_class, MKDEV(axl_aipu_major, axldev->minor));
 	cdev_del(&axldev->cdev);
-
-err_out:
 	axl_aipu_drv_dma_free(axldev);
-	axl_aipu_free_minor(axldev);
 	axl_aipu_pci_deinit(pdev);
+err_init_out:
+	axl_aipu_free_minor(axldev);
 	return err;
+}
+
+/*
+ * axl_aipu_sync_irqs() - Wait for all MSI handlers to finish executing.
+ *
+ * Calls synchronize_irq() on every allocated MSI vector so that no interrupt
+ * handler is running (or pending) once this returns. Must be called after the
+ * device's interrupt generation has been stopped and before resources the
+ * handlers reference (e.g. the VMSI DMA buffer) are released.
+ */
+static void axl_aipu_sync_irqs(struct axl_pcie_aipu_dev *axldev)
+{
+	struct pci_dev *pdev = axldev->pdev;
+	int i;
+
+	for (i = 0; i < axldev->nmsi; i++)
+		synchronize_irq(pci_irq_vector(pdev, i));
 }
 
 static void axl_aipu_remove(struct pci_dev *pdev)
@@ -1340,11 +1413,27 @@ static void axl_aipu_remove(struct pci_dev *pdev)
 	struct axl_pcie_aipu_dev *axldev = pci_get_drvdata(pdev);
 	unsigned int minor = MINOR(axldev->cdev.dev);
 
+	/*
+	 * Stop the device from generating any further interrupts before
+	 * tearing anything down. pci_clear_master() clears Bus Master Enable,
+	 * which immediately stops bus-master MSI writes even if the link/FW is
+	 * gone. axl_aipu_sync_irqs() then drains any interrupt already latched
+	 * in the APIC or in-flight on another CPU, so no handler is running once
+	 * it returns. Only then is the VMSI DMA buffer (axldev->dma_va) safe to
+	 * release in axl_aipu_drv_dma_free().
+	 */
+	pci_clear_master(pdev);
+	axl_aipu_sync_irqs(axldev);
+
+	/* Cooperatively quiesce the device DMA engine (hdrv->ctrl = 0). */
+	axl_aipu_disable_dev_dma(pdev);
+
 	axl_aipu_dev_debugfs_exit(axldev);
 
 	/* Cleanup firmware trace consumer */
 	axl_fwtrace_cleanup(axldev);
 
+	axl_aipu_remove_compat_symlink(axldev->class_dev, axldev->compat_name);
 	device_destroy(axl_aipu_class, MKDEV(axl_aipu_major, axldev->minor));
 	cdev_del(&axldev->cdev);
 	axl_aipu_free_minor(axldev);
@@ -1459,7 +1548,11 @@ static pci_ers_result_t axl_io_slot_reset(struct pci_dev *pdev)
 		result = PCI_ERS_RESULT_RECOVERED;
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
 	pci_aer_clear_nonfatal_status(pdev);
+#else
+	pci_cleanup_aer_uncorrect_error_status(pdev);
+#endif
 	pci_set_master(pdev);
 
 	return result;

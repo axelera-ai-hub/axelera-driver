@@ -53,7 +53,7 @@ static void axl_aipu_hdma_dev_dynmem_init(struct axl_pcie_aipu_dev *axldev)
 	struct device_dma_sg_desc_t *dma_sg_desc;
 	struct device_sys_ctl_t *dsctl;
 
-	dsctl = axldev->vl2base;
+	dsctl = axldev->vbase;
 	dma_sg_desc = axl_aipu_get_dma_sg_desc_area(axldev);
 	if (dma_sg_desc) {
 		axldev->desc_base = dma_sg_desc->dma_sg_desc_buf_ref.addr;
@@ -65,9 +65,9 @@ static void axl_aipu_hdma_dev_dynmem_init(struct axl_pcie_aipu_dev *axldev)
 	} else {
 		pr_debug(
 			"HDMA SG descriptor area not found, falling back to fixed area\n");
-		axldev->desc_base = HDMA_DESC_BASE;
 		axldev->desc_offset =
 			HDMA_DESC_SIZE - sizeof(struct dw_hdma_ll_buf);
+		axldev->desc_base = HDMA_DESC_BASE + axldev->desc_offset;
 	}
 	axldev->dma_vm = (dsctl->dma_vm == DMA_VM_SUPPORTED) ? 1 : 0;
 }
@@ -227,7 +227,7 @@ static inline int dma_wait_irq(struct axl_pcie_aipu_dev *axldev,
 			dma_wrk->channel, dma_wrk->id, ch_stat);
 		if (ch_stat != STATUS_REG_STOPPED) {
 			dma_wrk->status = -ETIMEDOUT;
-			atomic_set(&sctx->async_dma_xfer, ASYNC_XFER_TIMEOUT);
+			sctx_set_async_dma_xfer(sctx, ASYNC_XFER_TIMEOUT);
 			dma_wrk->qctrl->num_err++;
 			return -1;
 		}
@@ -236,7 +236,7 @@ static inline int dma_wait_irq(struct axl_pcie_aipu_dev *axldev,
 		dev_err(&pdev->dev, "DMA error %s CH%d (status 0x%x)\n", mode,
 			dma_wrk->channel, ch_stat);
 		dma_wrk->status = -EIO;
-		atomic_set(&sctx->async_dma_xfer, ASYNC_XFER_FAIL);
+		sctx_set_async_dma_xfer(sctx, ASYNC_XFER_FAIL);
 		dma_wrk->qctrl->num_err++;
 		return -1;
 	}
@@ -278,7 +278,7 @@ static inline int dma_wait_poll(struct axl_pcie_aipu_dev *axldev,
 	ch_stat = GET_RW_32_CH(hdma, dir, ch_stat, dma_wrk->channel);
 	if ((ch_stat != STATUS_REG_STOPPED) && !timeout) {
 		dma_wrk->status = -ETIMEDOUT;
-		atomic_set(&sctx->async_dma_xfer, ASYNC_XFER_TIMEOUT);
+		sctx_set_async_dma_xfer(sctx, ASYNC_XFER_TIMEOUT);
 		dma_wrk->qctrl->num_err++;
 		return -1;
 	}
@@ -286,7 +286,7 @@ static inline int dma_wait_poll(struct axl_pcie_aipu_dev *axldev,
 		dev_err(&pdev->dev, "DMA Poll error %s CH%d (stat 0x%x %d)\n",
 			mode, dma_wrk->channel, ch_stat, timeout);
 		dma_wrk->status = -EIO;
-		atomic_set(&sctx->async_dma_xfer, ASYNC_XFER_FAIL);
+		sctx_set_async_dma_xfer(sctx, ASYNC_XFER_FAIL);
 		dma_wrk->qctrl->num_err++;
 		return -1;
 	}
@@ -322,7 +322,7 @@ static void axl_aipu_hdma_dma_job(struct dma_wrk *dma_wrk)
 
 	hwlldch =
 		(struct dw_hdma_ll_buf *)axl_aipu_hdma_get_ll_desc_base(axldev);
-	lldch = axldev->vl2base + axldev->desc_offset;
+	lldch = axldev->vbase + axldev->desc_offset;
 
 	dma_wrk->status = 0;
 

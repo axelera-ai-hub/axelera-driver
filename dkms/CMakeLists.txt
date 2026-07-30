@@ -17,26 +17,30 @@ if(NOT DEFAULT_KERNEL)
   execute_process(
     COMMAND uname -r
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    OUTPUT_VARIABLE DEFAULT_KERNEL)
+    OUTPUT_VARIABLE DEFAULT_KERNEL
+  )
 endif()
 
 # Extract driver version from source file
 file(READ ${DRIVER_SRC_DIR}/axl-aipu-version.h AXL_AIPU_VERSION_H)
 string(REGEX MATCH "#define DRIVER_VERSION[ \t\r\n]+\"([^\"]*)\"" _
-             ${AXL_AIPU_VERSION_H})
+             ${AXL_AIPU_VERSION_H}
+)
 set(DRIVER_VERSION ${CMAKE_MATCH_1})
 set_property(GLOBAL PROPERTY axelera-metis-dkms-version ${DRIVER_VERSION})
 
 # Copy driver source and config to driver directory
 set(DRIVER_BASE_DIR
-    ${CMAKE_CURRENT_BINARY_DIR}/${DRIVER_NAME}-${DRIVER_VERSION})
+    ${CMAKE_CURRENT_BINARY_DIR}/${DRIVER_NAME}-${DRIVER_VERSION}
+)
 
 file(MAKE_DIRECTORY ${DRIVER_BASE_DIR}/driver)
 # `conf` directory does not need to go into the final output. Files from this
 # directory are configured below Copy driver source files (excluding dkms, conf,
 # .git directories)
 file(GLOB DRIVER_SOURCE_FILES "${DRIVER_SRC_DIR}/*.c" "${DRIVER_SRC_DIR}/*.h"
-     "${DRIVER_SRC_DIR}/Makefile" "${DRIVER_SRC_DIR}/LICENSE")
+     "${DRIVER_SRC_DIR}/Makefile" "${DRIVER_SRC_DIR}/LICENSE"
+)
 file(COPY ${DRIVER_SOURCE_FILES} DESTINATION ${DRIVER_BASE_DIR}/driver)
 
 # Create extra content for driver
@@ -45,17 +49,20 @@ set(DRIVER_PKG_EXTRA_DIR ${DRIVER_BASE_DIR}/extra)
 set(DRIVER_RULES_DIR ${DRIVER_PKG_EXTRA_DIR}/etc/udev/rules.d)
 file(MAKE_DIRECTORY ${DRIVER_RULES_DIR})
 file(COPY ${DRIVER_SRC_DIR}/udev/72-axelera.rules
-     DESTINATION ${DRIVER_RULES_DIR}/)
+     DESTINATION ${DRIVER_RULES_DIR}/
+)
 
 # Copy common scripts (shared between deb and rpm)
 set(DRIVER_SCRIPTS_DIR ${DRIVER_BASE_DIR}/scripts)
 file(MAKE_DIRECTORY ${DRIVER_SCRIPTS_DIR})
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/common/scripts/
-     DESTINATION ${DRIVER_SCRIPTS_DIR})
+     DESTINATION ${DRIVER_SCRIPTS_DIR}
+)
 
 # Configure dkms.conf from common directory
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/common/dkms.in
-               ${DRIVER_BASE_DIR}/dkms.conf @ONLY)
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/common/dkms.in ${DRIVER_BASE_DIR}/dkms.conf @ONLY
+)
 
 set(PKG_NAME ${DRIVER_NAME}-dkms)
 
@@ -78,14 +85,16 @@ set(DKMS_ARGS
     -m
     ${DRIVER_NAME}
     -v
-    ${DRIVER_VERSION})
+    ${DRIVER_VERSION}
+)
 
 add_custom_target(
   ${PKG_NAME}-build
   COMMAND rm -rf ${DKMS_TREE_DIR}
   COMMAND mkdir -p ${DKMS_TREE_DIR}
   COMMAND fakeroot dkms add ${DKMS_ARGS}
-  COMMAND fakeroot dkms build ${DKMS_ARGS})
+  COMMAND fakeroot dkms build ${DKMS_ARGS}
+)
 
 # ============================================================================
 # Debian package
@@ -111,7 +120,8 @@ add_custom_command(
   OUTPUT ${DEB_PKG_PATH}
   COMMAND dpkg-buildpackage -us -uc
   COMMENT "Package ${DRIVER_NAME}-dkms debian package"
-  WORKING_DIRECTORY ${DRIVER_BASE_DIR})
+  WORKING_DIRECTORY ${DRIVER_BASE_DIR}
+)
 
 add_custom_target(
   ${PKG_NAME}-deb-pkg
@@ -125,7 +135,8 @@ set_target_properties(
   PROPERTIES PACKAGE_NAME ${PKG_NAME} #
              PACKAGE_BUILD_PATH ${DEB_PKG_PATH} #
              PACKAGE_DEB ${DEB_PKG} #
-             PACKAGE_DIR ${DRIVER_BASE_DIR})
+             PACKAGE_DIR ${DRIVER_BASE_DIR}
+)
 
 # ============================================================================
 # RPM package
@@ -143,8 +154,9 @@ file(MAKE_DIRECTORY ${RPM_BUILD_DIR}/SPECS)
 file(MAKE_DIRECTORY ${RPM_BUILD_DIR}/SRPMS)
 
 # Configure the spec file
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/rpm/metis-dkms.spec.in
-               ${RPM_SPEC_FILE} @ONLY)
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/rpm/metis-dkms.spec.in ${RPM_SPEC_FILE} @ONLY
+)
 
 # Copy sources to RPM SOURCES directory
 file(COPY ${DRIVER_BASE_DIR}/driver DESTINATION ${RPM_BUILD_DIR}/SOURCES)
@@ -157,7 +169,8 @@ add_custom_command(
   COMMAND rpmbuild -bb --define "_topdir ${RPM_BUILD_DIR}" --define
           "_sourcedir ${RPM_BUILD_DIR}/SOURCES" ${RPM_SPEC_FILE}
   COMMENT "Package ${DRIVER_NAME}-dkms RPM package"
-  WORKING_DIRECTORY ${RPM_BUILD_DIR})
+  WORKING_DIRECTORY ${RPM_BUILD_DIR}
+)
 
 add_custom_target(
   ${PKG_NAME}-rpm-pkg
@@ -169,4 +182,5 @@ set_target_properties(
   PROPERTIES PACKAGE_NAME ${PKG_NAME} #
              PACKAGE_BUILD_PATH ${RPM_PKG_PATH} #
              PACKAGE_RPM ${RPM_PKG} #
-             PACKAGE_DIR ${DRIVER_BASE_DIR})
+             PACKAGE_DIR ${DRIVER_BASE_DIR}
+)

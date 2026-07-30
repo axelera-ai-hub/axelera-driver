@@ -322,7 +322,7 @@ axl_aipu_edma_debugfs_dbg_rd_chx_ll_write(struct file *file,
 			"Linked List Pointer not configured\n");
 		return size;
 	}
-	lli = axldev->vl2base +
+	lli = axldev->vbase +
 	      (((uint64_t)edma->type.unroll.ch[channel].rd.llp.msb << 32) +
 	       edma->type.unroll.ch[channel].rd.llp.lsb) -
 	      EDMA_L2_BASE;
@@ -373,7 +373,7 @@ static ssize_t axl_aipu_edma_debugfs_dbg_rd_chx_ll_read(struct file *file,
 			   *)((uint64_t)edma->type.unroll.ch[channel].rd.llp.msb
 				      << 32 |
 			      edma->type.unroll.ch[channel].rd.llp.lsb);
-	lli = axldev->vl2base +
+	lli = axldev->vbase +
 	      (((uint64_t)edma->type.unroll.ch[channel].rd.llp.msb << 32) +
 	       edma->type.unroll.ch[channel].rd.llp.lsb) -
 	      EDMA_L2_BASE;
@@ -453,7 +453,7 @@ axl_aipu_edma_debugfs_dbg_wr_chx_ll_write(struct file *file,
 			"Linked List Pointer not configured\n");
 		return size;
 	}
-	lli = axldev->vl2base +
+	lli = axldev->vbase +
 	      (((uint64_t)edma->type.unroll.ch[channel].wr.llp.msb << 32) +
 	       edma->type.unroll.ch[channel].wr.llp.lsb) -
 	      EDMA_L2_BASE;
@@ -506,7 +506,7 @@ static ssize_t axl_aipu_edma_debugfs_dbg_wr_chx_ll_read(struct file *file,
 			   *)((uint64_t)edma->type.unroll.ch[channel].wr.llp.msb
 				      << 32 |
 			      edma->type.unroll.ch[channel].wr.llp.lsb);
-	lli = axldev->vl2base +
+	lli = axldev->vbase +
 	      (((uint64_t)edma->type.unroll.ch[channel].wr.llp.msb << 32) +
 	       edma->type.unroll.ch[channel].wr.llp.lsb) -
 	      EDMA_L2_BASE;

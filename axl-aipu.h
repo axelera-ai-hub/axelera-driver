@@ -24,6 +24,8 @@
 
 #ifdef __KERNEL__
 
+#include <linux/version.h>
+
 /* Datastream source identifiers matching stream_source_t in sysctl_mem.h.
  * Defined here (before axl-aipu-fwtrace.h) because that header uses the type.
  * Values are the direct firmware indices used in device_datastream_t.
@@ -79,6 +81,7 @@ typedef enum {
 	STREAM_SOURCE_PVE_CORE14_TRACE = 80,
 	STREAM_SOURCE_PVE_CORE15_LOG = 81,
 	STREAM_SOURCE_PVE_CORE15_TRACE = 82,
+	STREAM_SOURCE_MONITOR = 83,
 	STREAM_SOURCE_RESERVED = 255,
 	STREAM_SOURCE_MAX = 256,
 } stream_source_t;
@@ -103,6 +106,7 @@ typedef enum {
  * sysctl substructures magic numbers
  * WARNING: not supposed to be changed - used for sanity check
  */
+#define SYSCTL_HDIF_HEADER_MAGIC      (0xFD1F)
 #define SYSCTL_DATASTREAM_AREA_MAGIC  (0xF0F0)
 #define SYSCTL_HOST_DRV_AREA_MAGIC    (0xBAC1)
 #define SYSCTL_DMA_SG_DESC_AREA_MAGIC (0xD4D4)
@@ -229,6 +233,13 @@ struct version_t {
 	uint8_t minor;
 };
 
+struct hdif_header_t {
+	uint16_t magic; // magic number for sanity check
+	uint8_t reserved[6];
+	uint64_t base; // device-physical base address of the host-device interface region
+	uint64_t size; // total reserved size of the host-device interface region (static + dynamic)
+};
+
 struct memory_reference_t {
 	uint16_t magic; // magic number for sanity check
 	struct version_t version; // version of the area
@@ -240,7 +251,8 @@ struct memory_reference_t {
 
 struct device_sys_ctl_t {
 	/* -------- Static Runtime Area (1KB) --------- */
-	uint8_t pad0[176]; // 0x00
+	struct hdif_header_t header; // 0x00 (24 bytes)
+	uint8_t pad0[152]; // 0x18
 	struct cmd_t cmd; // 0xb0
 	uint8_t pad1[72];
 	struct version_t master_version; // 0x200
@@ -251,7 +263,8 @@ struct device_sys_ctl_t {
 	uint64_t fw_load_addr;
 	struct memory_reference_t datastream_mem_ref;
 	struct memory_reference_t boardinfo_mem_ref;
-	struct memory_reference_t axemsg_mem_ref;
+	struct memory_reference_t
+		axemsg_mem_ref; // [DEPRECATED] can be overwritten
 	struct memory_reference_t ctx_mem_ref;
 	struct memory_reference_t virt_mem_ref;
 	struct memory_reference_t hdrv_mem_ref;
@@ -371,8 +384,8 @@ struct axl_msi_fops {
 };
 #define MAX_MEMORY_AREA 2
 struct dev_res_info {
-	__u64 sysmem_base;
-	__u64 sysmem_size;
+	__u64 sysspm_base;
+	__u64 sysspm_size;
 	__u64 l2_base;
 	__u64 l2_size;
 	__u64 ddr_base[MAX_MEMORY_AREA];
@@ -390,6 +403,7 @@ struct dev_mem_window {
 
 struct axl_pcie_aipu_dev {
 	char name[NAME_SIZE];
+	char compat_name[NAME_SIZE];
 	struct pci_dev *pdev;
 	int dma_enabled : 1;
 	int dma_vm : 1;
@@ -420,6 +434,7 @@ struct axl_pcie_aipu_dev {
 	uint64_t *ctx_mask; // per device context mask
 	// char
 	struct cdev cdev;
+	struct device *class_dev;
 	struct dentry *dentry;
 	int minor;
 	// recovery thread
@@ -430,8 +445,8 @@ struct axl_pcie_aipu_dev {
 	// pcie dma
 	void *dma;
 	phys_addr_t pdma;
-	void __iomem *vl2base;
-	phys_addr_t pl2base;
+	void __iomem *vbase;
+	phys_addr_t pbase;
 	struct irq_wrk *irq_wrk;
 	struct dma_queue_ctrl *dma_wrqc;
 	struct dma_queue_ctrl *dma_rdqc;
@@ -457,6 +472,7 @@ struct axl_pcie_aipu_dev {
  */
 struct fwtrace_session {
 	struct kfifo fifo; /* Per-session kernel ring buffer */
+	void *fifo_buf; /* Backing store for @fifo (kvmalloc'd) */
 	spinlock_t lock; /* Protects fifo */
 	wait_queue_head_t wait_queue; /* For blocking reads */
 	atomic64_t overruns; /* Per-session overrun count */
@@ -479,6 +495,18 @@ struct sysctrl_ctx {
 	stream_source_t fwtrace_src; /* Which log source to read */
 	struct fwtrace_session fwtrace_session; /* Per-fd trace state */
 };
+
+/*
+ * Record an async DMA transfer status on the owning sysctrl context.
+ * The fwtrace consumer path issues DMA jobs with no sysctrl context
+ * (dma_wrk->sctx == NULL), so callers in the DMA wait/error paths must
+ * not dereference it unconditionally.
+ */
+static inline void sctx_set_async_dma_xfer(struct sysctrl_ctx *sctx, int status)
+{
+	if (sctx)
+		atomic_set(&sctx->async_dma_xfer, status);
+}
 
 struct dma_channel_stats {
 	int count; /* Current active transfers */
@@ -664,7 +692,7 @@ static inline int validate_dma_xfer(struct dmabuf_xfer *dxfer,
 static inline struct device_dma_sg_desc_t *
 axl_aipu_get_dma_sg_desc_area(struct axl_pcie_aipu_dev *axldev)
 {
-	struct device_sys_ctl_t *dsctl = axldev->vl2base;
+	struct device_sys_ctl_t *dsctl = axldev->vbase;
 	if (dsctl->dmasgdesc_mem_ref.magic != SYSCTL_DMA_SG_DESC_AREA_MAGIC) {
 		return NULL;
 	}
@@ -674,14 +702,18 @@ axl_aipu_get_dma_sg_desc_area(struct axl_pcie_aipu_dev *axldev)
 
 static inline uint64_t axl_aipu_get_hdif_base(struct axl_pcie_aipu_dev *axldev)
 {
-	struct device_sys_ctl_t *dsctl = axldev->vl2base;
+	struct device_sys_ctl_t *dsctl = axldev->vbase;
+	if (dsctl->header.magic == SYSCTL_HDIF_HEADER_MAGIC) {
+		return dsctl->header.base;
+	}
+
 	return dsctl->memory_map[0];
 }
 
 static inline struct device_vmsi_config_t *
 axl_aipu_get_msi_config_area(struct axl_pcie_aipu_dev *axldev)
 {
-	struct device_sys_ctl_t *dsctl = axldev->vl2base;
+	struct device_sys_ctl_t *dsctl = axldev->vbase;
 	if (dsctl->vmsi_mem_ref.magic != SYSCTL_VMSI_AREA_MAGIC) {
 		return NULL;
 	}
@@ -689,12 +721,20 @@ axl_aipu_get_msi_config_area(struct axl_pcie_aipu_dev *axldev)
 					       dsctl->vmsi_mem_ref.offset);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
+static inline void vm_flags_clear(struct vm_area_struct *vma, vm_flags_t flags)
+{
+	vma->vm_flags &= ~flags;
+}
+#endif
+
 long sysctl_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 void axl_aipu_sys_ctx_release(struct kref *kref);
 void axl_aipu_dma_wrk_release(struct kref *kref);
 
 void axl_aipu_config_dev_dma(struct axl_pcie_aipu_dev *axldev);
 void axl_aipu_config_dev_msi(struct axl_pcie_aipu_dev *axldev);
+void axl_aipu_dma_imwr_restore(struct axl_pcie_aipu_dev *axldev);
 
 #endif // __KERNEL__
 

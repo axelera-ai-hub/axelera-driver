@@ -472,7 +472,7 @@ axl_aipu_hdma_debugfs_dbg_rd_chx_ll_write(struct file *file,
 	volatile struct dw_hdma_v0_lli *lli;
 	volatile struct dw_hdma_ll_buf *lldch;
 
-	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vl2base +
+	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vbase +
 						   axldev->desc_offset);
 	lli = (volatile struct dw_hdma_v0_lli *)__get_ll_base(
 		lldch, DW_HDMA_DIR_WRITE, channel);
@@ -524,7 +524,7 @@ static ssize_t axl_aipu_hdma_debugfs_dbg_rd_chx_ll_read(struct file *file,
 		(struct dw_hdma_ll_buf *)((uint64_t)hdma->ch[channel].rd.llp.msb
 						  << 32 |
 					  hdma->ch[channel].rd.llp.lsb);
-	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vl2base +
+	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vbase +
 						   axldev->desc_offset);
 	lli = (volatile struct dw_hdma_v0_lli *)__get_ll_base(
 		lldch, DW_HDMA_DIR_READ, channel);
@@ -615,7 +615,7 @@ axl_aipu_hdma_debugfs_dbg_wr_chx_ll_write(struct file *file,
 			"Linked List Pointer not configured\n");
 		return size;
 	}
-	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vl2base +
+	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vbase +
 						   axldev->desc_offset);
 	lli = (volatile struct dw_hdma_v0_lli *)__get_ll_base(
 		lldch, DW_HDMA_DIR_WRITE, channel);
@@ -669,7 +669,7 @@ static ssize_t axl_aipu_hdma_debugfs_dbg_wr_chx_ll_read(struct file *file,
 		(struct dw_hdma_ll_buf *)((uint64_t)hdma->ch[channel].wr.llp.msb
 						  << 32 |
 					  hdma->ch[channel].wr.llp.lsb);
-	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vl2base +
+	lldch = (volatile struct dw_hdma_ll_buf *)(axldev->vbase +
 						   axldev->desc_offset);
 	lli = (volatile struct dw_hdma_v0_lli *)__get_ll_base(
 		lldch, DW_HDMA_DIR_WRITE, channel);

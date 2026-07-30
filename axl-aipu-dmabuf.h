@@ -83,6 +83,7 @@ struct dma_p2p_xfer {
 #define AXL_IOCTL_FWTRACE_DISABLE      _IOW(AXL_IOCTL_BASE, 24, uint32_t)
 #define AXL_IOCTL_FWTRACE_CLEAR_BUFFER _IOW(AXL_IOCTL_BASE, 25, uint32_t)
 #define AXL_IOCTL_GET_DMA_STATS	       _IOR(AXL_IOCTL_BASE, 32, struct dma_stats)
+#define AXL_IOCTL_GET_USER_PA	       _IOWR(AXL_IOCTL_BASE, 50, struct user_pa_req)
 
 /**
  * struct fwtrace_stats - Firmware trace statistics
@@ -94,6 +95,11 @@ struct fwtrace_stats {
 	uint64_t total_bytes;
 	uint64_t overruns;
 	uint64_t available_bytes;
+};
+
+struct user_pa_req {
+	__u64 virt;
+	__u64 pa;
 };
 
 enum {

@@ -833,6 +833,36 @@ static long sysctl_ioctl_dma_p2p_xfer(struct file *file, unsigned long arg)
 	return err > 0 ? dma_wrk->status : err;
 }
 
+static long sysctl_ioctl_get_user_pa(struct file *file, unsigned long arg)
+{
+	struct sysctrl_ctx *sys_ctx = file->private_data;
+	struct axl_pcie_aipu_dev *axldev = sys_ctx->axldev;
+	struct pci_dev *pdev = axldev->pdev;
+	struct user_pa_req req;
+	struct page *page = NULL;
+	int ret;
+
+	if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+		return -EFAULT;
+
+	ret = get_user_pages_fast(req.virt, 1, 0, &page);
+	if (ret < 0)
+		return ret;
+	if (ret == 0)
+		return -EFAULT;
+
+	req.pa = page_to_phys(page) | (req.virt & ~PAGE_MASK);
+	put_page(page);
+
+	dev_dbg(&pdev->dev, "GET_USER_PA: virt=0x%llx pa=0x%llx\n", req.virt,
+		req.pa);
+
+	if (copy_to_user((void __user *)arg, &req, sizeof(req)))
+		return -EFAULT;
+
+	return 0;
+}
+
 static long sysctl_ioctl_dynmem_load(struct file *file, unsigned long arg)
 {
 	struct sysctrl_ctx *sys_ctx = file->private_data;
@@ -841,6 +871,7 @@ static long sysctl_ioctl_dynmem_load(struct file *file, unsigned long arg)
 	axl_aipu_config_dev_dma(axldev);
 	axl_aipu_config_dev_msi(axldev);
 	axl_aipu_dev_dynmem_init(axldev);
+	axl_aipu_dma_imwr_restore(axldev);
 	axl_aipu_fwtrace_refresh(axldev);
 
 	return 0;
@@ -1122,6 +1153,9 @@ long sysctl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		ret = axl_fwtrace_clear_buffer(file, source);
 		break;
 	}
+	case AXL_IOCTL_GET_USER_PA:
+		ret = sysctl_ioctl_get_user_pa(file, arg);
+		break;
 	default: ret = -ENOTTY; break;
 	}
 	return ret;
