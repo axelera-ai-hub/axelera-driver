@@ -91,8 +91,7 @@ static void axl_dma_trace_add(struct axl_pcie_aipu_dev *axldev,
 	entry->channel = dma_wrk->channel;
 	entry->sgt_entries = dma_wrk->table ? dma_wrk->table->nents : 0;
 	entry->flags = dma_wrk->flags;
-	strncpy(entry->mode, mode, sizeof(entry->mode) - 1);
-	entry->mode[sizeof(entry->mode) - 1] = '\0';
+	strscpy(entry->mode, mode, sizeof(entry->mode));
 
 	/* Memory barrier: ensure entry is fully written before advancing head */
 	smp_wmb();
